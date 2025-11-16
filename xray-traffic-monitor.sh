@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ============================================================================
-# Xray Traffic Monitor - Мониторинг трафика пользователей через Stats API
+# Xray Traffic Monitor - Интерактивный мониторинг трафика в реальном времени
 # Установка: wget -O - https://raw.githubusercontent.com/YOUR_REPO/xray-traffic-monitor.sh | bash
 # ============================================================================
 
@@ -12,10 +12,12 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
 NC='\033[0m'
 
 echo -e "${BLUE}╔════════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${BLUE}║         Установка Xray Traffic Monitor v1.0                   ║${NC}"
+echo -e "${BLUE}║         Установка Xray Traffic Monitor v2.0                   ║${NC}"
 echo -e "${BLUE}╚════════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 
@@ -34,109 +36,127 @@ fi
 
 # Установка зависимостей
 echo -e "${YELLOW}⚙ Проверка зависимостей...${NC}"
-if ! command -v bc &> /dev/null; then
-    echo -e "${YELLOW}  Установка bc...${NC}"
-    apt-get update > /dev/null 2>&1
-    apt-get install -y bc > /dev/null 2>&1
-fi
+apt-get update > /dev/null 2>&1
 
-if ! command -v jq &> /dev/null; then
-    echo -e "${YELLOW}  Установка jq...${NC}"
-    apt-get install -y jq > /dev/null 2>&1
-fi
+for pkg in bc jq curl; do
+    if ! command -v $pkg &> /dev/null; then
+        echo -e "${YELLOW}  Установка $pkg...${NC}"
+        apt-get install -y $pkg > /dev/null 2>&1
+    fi
+done
 
 echo -e "${GREEN}✓ Зависимости установлены${NC}"
 
 # Создание основного скрипта
 echo -e "${YELLOW}⚙ Создание скрипта мониторинга...${NC}"
 
-cat << 'EOF' > /usr/local/bin/xray-traffic-monitor
+cat << 'MAINSCRIPT' > /usr/local/bin/xray-traffic-monitor
 #!/bin/bash
 
-# Цвета для вывода
+# Цвета
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+WHITE='\033[1;37m'
 NC='\033[0m'
 
 CONFIG_FILE="/usr/local/etc/xray/config.json"
 API_PORT=10085
 API_SERVER="127.0.0.1:${API_PORT}"
+REFRESH_INTERVAL=2
 
-# Функция для конвертации байтов в читаемый формат
+# Функция очистки экрана
+clear_screen() {
+    clear
+    echo -e "${BLUE}╔════════════════════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${BLUE}║                  XRAY TRAFFIC MONITOR - Real-time v2.0                    ║${NC}"
+    echo -e "${BLUE}╚════════════════════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+}
+
+# Функция для конвертации байтов
 bytes_to_human() {
     local bytes=$1
-    local gb mb kb
+    
+    if [[ -z "$bytes" || "$bytes" == "0" ]]; then
+        echo "0 B"
+        return
+    fi
     
     if (( bytes >= 1073741824 )); then
-        gb=$(echo "scale=2; $bytes / 1073741824" | bc)
-        echo "${gb} GB"
+        printf "%.2f GB" $(echo "scale=2; $bytes / 1073741824" | bc)
     elif (( bytes >= 1048576 )); then
-        mb=$(echo "scale=2; $bytes / 1048576" | bc)
-        echo "${mb} MB"
+        printf "%.2f MB" $(echo "scale=2; $bytes / 1048576" | bc)
     elif (( bytes >= 1024 )); then
-        kb=$(echo "scale=2; $bytes / 1024" | bc)
-        echo "${kb} KB"
+        printf "%.2f KB" $(echo "scale=2; $bytes / 1024" | bc)
     else
         echo "${bytes} B"
     fi
 }
 
-# Проверка установки Xray
-if ! command -v xray &> /dev/null; then
-    echo -e "${RED}✗ Xray не установлен!${NC}"
-    exit 1
-fi
+# Функция конвертации в байты в секунду
+bytes_per_sec() {
+    local bytes=$1
+    local interval=${2:-1}
+    
+    if [[ -z "$bytes" || "$bytes" == "0" ]]; then
+        echo "0 B/s"
+        return
+    fi
+    
+    local bps=$(echo "$bytes / $interval" | bc)
+    
+    if (( bps >= 1048576 )); then
+        printf "%.2f MB/s" $(echo "scale=2; $bps / 1048576" | bc)
+    elif (( bps >= 1024 )); then
+        printf "%.2f KB/s" $(echo "scale=2; $bps / 1024" | bc)
+    else
+        echo "${bps} B/s"
+    fi
+}
 
-# Проверка наличия конфига
-if [[ ! -f "$CONFIG_FILE" ]]; then
-    echo -e "${RED}✗ Конфиг Xray не найден: $CONFIG_FILE${NC}"
-    exit 1
-fi
-
-# Функция проверки Stats API
+# Проверка Stats API
 check_stats_api() {
     if ! jq -e '.stats' "$CONFIG_FILE" > /dev/null 2>&1; then
         return 1
     fi
-    
     if ! jq -e '.api.services[] | select(. == "StatsService")' "$CONFIG_FILE" > /dev/null 2>&1; then
         return 1
     fi
-    
     return 0
 }
 
-# Функция установки Stats API
+# Установка Stats API
 setup_stats_api() {
+    clear_screen
     echo -e "${YELLOW}⚙ Настройка Stats API...${NC}"
+    echo ""
     
-    # Создаем резервную копию
     cp "$CONFIG_FILE" "${CONFIG_FILE}.backup.$(date +%Y%m%d_%H%M%S)"
-    echo -e "${GREEN}✓ Резервная копия создана${NC}"
+    echo -e "${GREEN}✓${NC} Резервная копия создана"
     
     # Добавляем stats
     if ! jq -e '.stats' "$CONFIG_FILE" > /dev/null 2>&1; then
         jq '. + {"stats": {}}' "$CONFIG_FILE" > /tmp/xray_config.tmp && mv /tmp/xray_config.tmp "$CONFIG_FILE"
-        echo -e "${GREEN}✓ Добавлен блок stats${NC}"
+        echo -e "${GREEN}✓${NC} Добавлен блок stats"
     fi
     
     # Добавляем api
     if ! jq -e '.api' "$CONFIG_FILE" > /dev/null 2>&1; then
         jq '. + {"api": {"tag": "api", "services": ["StatsService"]}}' "$CONFIG_FILE" > /tmp/xray_config.tmp && mv /tmp/xray_config.tmp "$CONFIG_FILE"
-        echo -e "${GREEN}✓ Добавлен API сервис${NC}"
+        echo -e "${GREEN}✓${NC} Добавлен API сервис"
     fi
     
-    # Добавляем policy для статистики
+    # Policy
     jq '.policy.levels."0" += {"statsUserUplink": true, "statsUserDownlink": true}' "$CONFIG_FILE" > /tmp/xray_config.tmp && mv /tmp/xray_config.tmp "$CONFIG_FILE"
     jq '.policy.system = {"statsInboundUplink": true, "statsInboundDownlink": true}' "$CONFIG_FILE" > /tmp/xray_config.tmp && mv /tmp/xray_config.tmp "$CONFIG_FILE"
-    echo -e "${GREEN}✓ Настроены политики статистики${NC}"
+    echo -e "${GREEN}✓${NC} Настроены политики статистики"
     
-    # Проверяем наличие API inbound
+    # API inbound
     api_exists=$(jq '.inbounds[] | select(.tag == "api")' "$CONFIG_FILE")
-    
     if [[ -z "$api_exists" ]]; then
         jq --argjson api_inbound '{
             "listen": "127.0.0.1",
@@ -145,108 +165,240 @@ setup_stats_api() {
             "settings": {"address": "127.0.0.1"},
             "tag": "api"
         }' '.inbounds += [$api_inbound]' "$CONFIG_FILE" > /tmp/xray_config.tmp && mv /tmp/xray_config.tmp "$CONFIG_FILE"
-        echo -e "${GREEN}✓ Добавлен API inbound${NC}"
+        echo -e "${GREEN}✓${NC} Добавлен API inbound"
     fi
     
-    # Добавляем routing для API
+    # Routing
     api_route_exists=$(jq '.routing.rules[] | select(.inboundTag[0] == "api")' "$CONFIG_FILE" 2>/dev/null)
-    
     if [[ -z "$api_route_exists" ]]; then
         jq --argjson api_rule '{
             "type": "field",
             "inboundTag": ["api"],
             "outboundTag": "api"
         }' '.routing.rules += [$api_rule]' "$CONFIG_FILE" > /tmp/xray_config.tmp && mv /tmp/xray_config.tmp "$CONFIG_FILE"
-        echo -e "${GREEN}✓ Добавлен routing для API${NC}"
+        echo -e "${GREEN}✓${NC} Добавлен routing для API"
     fi
     
-    # Добавляем API outbound если его нет
+    # Outbound
     api_outbound_exists=$(jq '.outbounds[] | select(.tag == "api")' "$CONFIG_FILE")
-    
     if [[ -z "$api_outbound_exists" ]]; then
         jq --argjson api_outbound '{
             "protocol": "freedom",
             "tag": "api"
         }' '.outbounds += [$api_outbound]' "$CONFIG_FILE" > /tmp/xray_config.tmp && mv /tmp/xray_config.tmp "$CONFIG_FILE"
-        echo -e "${GREEN}✓ Добавлен API outbound${NC}"
+        echo -e "${GREEN}✓${NC} Добавлен API outbound"
     fi
     
     echo ""
-    echo -e "${YELLOW}⟳ Перезапуск Xray...${NC}"
+    echo -e "${YELLOW}⟳${NC} Перезапуск Xray..."
     systemctl restart xray
-    sleep 2
+    sleep 3
     
     if systemctl is-active --quiet xray; then
-        echo -e "${GREEN}✓ Xray успешно перезапущен${NC}"
+        echo -e "${GREEN}✓${NC} Xray успешно перезапущен"
+        echo ""
+        echo -e "${GREEN}╔════════════════════════════════════════════════════════════════╗${NC}"
+        echo -e "${GREEN}║              Stats API успешно установлен!                    ║${NC}"
+        echo -e "${GREEN}╚════════════════════════════════════════════════════════════════╝${NC}"
     else
-        echo -e "${RED}✗ Ошибка перезапуска Xray!${NC}"
-        echo -e "${YELLOW}Восстановление из резервной копии...${NC}"
+        echo -e "${RED}✗${NC} Ошибка перезапуска Xray!"
         latest_backup=$(ls -t ${CONFIG_FILE}.backup.* 2>/dev/null | head -1)
         if [[ -n "$latest_backup" ]]; then
             cp "$latest_backup" "$CONFIG_FILE"
             systemctl restart xray
         fi
-        exit 1
+        return 1
     fi
     
     echo ""
-    echo -e "${GREEN}╔════════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}║              Stats API успешно установлен!                    ║${NC}"
-    echo -e "${GREEN}╚════════════════════════════════════════════════════════════════╝${NC}"
+    read -p "Нажмите Enter для продолжения..."
 }
 
-# Функция получения статистики пользователя
+# Получение статистики пользователя
 get_user_stats() {
     local email=$1
     local uplink downlink
     
-    uplink=$(xray api statsquery --server="$API_SERVER" -pattern "user>>>$email>>>traffic>>>uplink" 2>/dev/null | \
-             grep -oP '"value"\s*:\s*"\K\d+' || echo "0")
+    # Используем альтернативный способ получения статистики
+    local stats_output=$(xray api statsquery --server="$API_SERVER" 2>/dev/null)
     
-    downlink=$(xray api statsquery --server="$API_SERVER" -pattern "user>>>$email>>>traffic>>>downlink" 2>/dev/null | \
-               grep -oP '"value"\s*:\s*"\K\d+' || echo "0")
+    # Пытаемся получить uplink
+    uplink=$(echo "$stats_output" | grep "user>>>$email>>>traffic>>>uplink" -A 3 | grep -oP '"value"\s*:\s*"\K\d+' | head -1)
+    downlink=$(echo "$stats_output" | grep "user>>>$email>>>traffic>>>downlink" -A 3 | grep -oP '"value"\s*:\s*"\K\d+' | head -1)
+    
+    # Если не получили через grep, пробуем jq
+    if [[ -z "$uplink" ]]; then
+        uplink=$(echo "$stats_output" | jq -r '.stat[] | select(.name | contains("user>>>'"$email"'>>>traffic>>>uplink")) | .value // "0"' 2>/dev/null | head -1)
+    fi
+    
+    if [[ -z "$downlink" ]]; then
+        downlink=$(echo "$stats_output" | jq -r '.stat[] | select(.name | contains("user>>>'"$email"'>>>traffic>>>downlink")) | .value // "0"' 2>/dev/null | head -1)
+    fi
+    
+    # Если все еще пусто, ставим 0
+    uplink=${uplink:-0}
+    downlink=${downlink:-0}
     
     echo "$uplink $downlink"
 }
 
-# Функция сброса статистики пользователя
+# Сброс статистики
 reset_user_stats() {
     local email=$1
-    
     xray api stats --server="$API_SERVER" -name "user>>>$email>>>traffic>>>uplink" -reset > /dev/null 2>&1
     xray api stats --server="$API_SERVER" -name "user>>>$email>>>traffic>>>downlink" -reset > /dev/null 2>&1
 }
 
-# Функция отображения статистики
-show_stats() {
-    local emails
+reset_all_stats() {
+    local emails=($(jq -r '.inbounds[0].settings.clients[].email' "$CONFIG_FILE" 2>/dev/null))
+    for email in "${emails[@]}"; do
+        reset_user_stats "$email"
+    done
+}
+
+# Мониторинг в реальном времени
+realtime_monitor() {
+    if ! check_stats_api; then
+        clear_screen
+        echo -e "${RED}✗ Stats API не настроен!${NC}"
+        echo ""
+        read -p "Настроить сейчас? (y/n): " choice
+        if [[ "$choice" == "y" || "$choice" == "Y" ]]; then
+            setup_stats_api
+        else
+            return
+        fi
+    fi
     
-    emails=($(jq -r '.inbounds[0].settings.clients[].email' "$CONFIG_FILE" 2>/dev/null))
+    clear_screen
+    echo -e "${CYAN}Установите интервал обновления (в секундах, по умолчанию 2):${NC}"
+    read -p "> " interval
+    interval=${interval:-2}
+    
+    if ! [[ "$interval" =~ ^[0-9]+$ ]] || (( interval < 1 )); then
+        interval=2
+    fi
+    
+    # Массивы для хранения предыдущих значений
+    declare -A prev_uplink
+    declare -A prev_downlink
+    
+    local emails=($(jq -r '.inbounds[0].settings.clients[].email' "$CONFIG_FILE" 2>/dev/null))
+    
+    # Инициализация
+    for email in "${emails[@]}"; do
+        local stats=$(get_user_stats "$email")
+        prev_uplink[$email]=$(echo "$stats" | awk '{print $1}')
+        prev_downlink[$email]=$(echo "$stats" | awk '{print $2}')
+    done
+    
+    while true; do
+        clear
+        echo -e "${BLUE}╔════════════════════════════════════════════════════════════════════════════════════════════════╗${NC}"
+        echo -e "${BLUE}║                     МОНИТОРИНГ В РЕАЛЬНОМ ВРЕМЕНИ (Обновление: ${interval}s)                           ║${NC}"
+        echo -e "${BLUE}╚════════════════════════════════════════════════════════════════════════════════════════════════╝${NC}"
+        echo ""
+        echo -e "${YELLOW}Время:${NC} $(date '+%Y-%m-%d %H:%M:%S')    ${YELLOW}Нажмите Ctrl+C для выхода${NC}"
+        echo ""
+        
+        printf "${CYAN}%-20s %15s %15s %15s %15s %15s${NC}\n" \
+            "ПОЛЬЗОВАТЕЛЬ" "ОТПРАВЛЕНО" "ПОЛУЧЕНО" "ВСЕГО" "СКОРОСТЬ ↑" "СКОРОСТЬ ↓"
+        echo "────────────────────────────────────────────────────────────────────────────────────────────────────────"
+        
+        local total_up=0
+        local total_down=0
+        local total_speed_up=0
+        local total_speed_down=0
+        
+        for email in "${emails[@]}"; do
+            local stats=$(get_user_stats "$email")
+            local uplink=$(echo "$stats" | awk '{print $1}')
+            local downlink=$(echo "$stats" | awk '{print $2}')
+            
+            # Вычисляем скорость
+            local speed_up=$((uplink - prev_uplink[$email]))
+            local speed_down=$((downlink - prev_downlink[$email]))
+            
+            # Если скорость отрицательная (после сброса), обнуляем
+            if (( speed_up < 0 )); then speed_up=0; fi
+            if (( speed_down < 0 )); then speed_down=0; fi
+            
+            local total=$((uplink + downlink))
+            
+            total_up=$((total_up + uplink))
+            total_down=$((total_down + downlink))
+            total_speed_up=$((total_speed_up + speed_up))
+            total_speed_down=$((total_speed_down + speed_down))
+            
+            # Цветовая индикация активности
+            local color=$NC
+            if (( speed_up > 0 || speed_down > 0 )); then
+                color=$GREEN
+            fi
+            
+            printf "${color}%-20s %15s %15s %15s %15s %15s${NC}\n" \
+                "$email" \
+                "$(bytes_to_human $uplink)" \
+                "$(bytes_to_human $downlink)" \
+                "$(bytes_to_human $total)" \
+                "$(bytes_per_sec $speed_up $interval)" \
+                "$(bytes_per_sec $speed_down $interval)"
+            
+            # Сохраняем текущие значения
+            prev_uplink[$email]=$uplink
+            prev_downlink[$email]=$downlink
+        done
+        
+        echo "────────────────────────────────────────────────────────────────────────────────────────────────────────"
+        printf "${WHITE}%-20s %15s %15s %15s %15s %15s${NC}\n" \
+            "ИТОГО:" \
+            "$(bytes_to_human $total_up)" \
+            "$(bytes_to_human $total_down)" \
+            "$(bytes_to_human $((total_up + total_down)))" \
+            "$(bytes_per_sec $total_speed_up $interval)" \
+            "$(bytes_per_sec $total_speed_down $interval)"
+        
+        echo ""
+        echo -e "${YELLOW}Легенда:${NC} ${GREEN}Зеленый${NC} = активное соединение | ${NC}Белый${NC} = неактивен"
+        
+        sleep $interval
+    done
+}
+
+# Просмотр общей статистики
+view_stats() {
+    if ! check_stats_api; then
+        clear_screen
+        echo -e "${RED}✗ Stats API не настроен!${NC}"
+        echo ""
+        read -p "Нажмите Enter для возврата в меню..."
+        return
+    fi
+    
+    clear_screen
+    echo -e "${CYAN}ОБЩАЯ СТАТИСТИКА${NC}"
+    echo ""
+    
+    local emails=($(jq -r '.inbounds[0].settings.clients[].email' "$CONFIG_FILE" 2>/dev/null))
     
     if [[ ${#emails[@]} -eq 0 ]]; then
         echo -e "${YELLOW}⚠ Список пользователей пуст${NC}"
-        exit 0
+        echo ""
+        read -p "Нажмите Enter для возврата в меню..."
+        return
     fi
     
-    echo ""
-    echo -e "${BLUE}╔════════════════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BLUE}║            СТАТИСТИКА ТРАФИКА ПОЛЬЗОВАТЕЛЕЙ XRAY                      ║${NC}"
-    echo -e "${BLUE}╚════════════════════════════════════════════════════════════════════════╝${NC}"
-    echo ""
-    
     printf "${CYAN}%-20s %15s %15s %15s${NC}\n" "ПОЛЬЗОВАТЕЛЬ" "ОТПРАВЛЕНО ↑" "ПОЛУЧЕНО ↓" "ВСЕГО"
-    echo "────────────────────────────────────────────────────────────────────────────"
+    echo "────────────────────────────────────────────────────────────────────"
     
     local total_up=0
     local total_down=0
     
     for email in "${emails[@]}"; do
-        local stats uplink downlink total
-        
-        stats=$(get_user_stats "$email")
-        uplink=$(echo "$stats" | awk '{print $1}')
-        downlink=$(echo "$stats" | awk '{print $2}')
-        total=$((uplink + downlink))
+        local stats=$(get_user_stats "$email")
+        local uplink=$(echo "$stats" | awk '{print $1}')
+        local downlink=$(echo "$stats" | awk '{print $2}')
+        local total=$((uplink + downlink))
         
         total_up=$((total_up + uplink))
         total_down=$((total_down + downlink))
@@ -258,41 +410,71 @@ show_stats() {
             "$(bytes_to_human $total)"
     done
     
-    echo "────────────────────────────────────────────────────────────────────────────"
+    echo "────────────────────────────────────────────────────────────────────"
     printf "${GREEN}%-20s %15s %15s %15s${NC}\n" \
         "ИТОГО:" \
         "$(bytes_to_human $total_up)" \
         "$(bytes_to_human $total_down)" \
         "$(bytes_to_human $((total_up + total_down)))"
+    
     echo ""
+    read -p "Нажмите Enter для возврата в меню..."
 }
 
-# Функция отображения детальной статистики пользователя
-show_user_detail() {
-    local email=$1
-    local stats uplink downlink total
-    
-    if ! jq -e --arg email "$email" '.inbounds[0].settings.clients[] | select(.email == $email)' "$CONFIG_FILE" > /dev/null 2>&1; then
-        echo -e "${RED}✗ Пользователь '$email' не найден${NC}"
-        exit 1
+# Детали пользователя
+view_user_detail() {
+    if ! check_stats_api; then
+        clear_screen
+        echo -e "${RED}✗ Stats API не настроен!${NC}"
+        echo ""
+        read -p "Нажмите Enter для возврата в меню..."
+        return
     fi
     
-    stats=$(get_user_stats "$email")
-    uplink=$(echo "$stats" | awk '{print $1}')
-    downlink=$(echo "$stats" | awk '{print $2}')
-    total=$((uplink + downlink))
+    clear_screen
+    local emails=($(jq -r '.inbounds[0].settings.clients[].email' "$CONFIG_FILE" 2>/dev/null))
     
-    local uuid subscription created_date
-    uuid=$(jq -r --arg email "$email" '.inbounds[0].settings.clients[] | select(.email == $email) | .id' "$CONFIG_FILE")
-    subscription=$(jq -r --arg email "$email" '.inbounds[0].settings.clients[] | select(.email == $email) | .metadata.subscription // "n/a"' "$CONFIG_FILE")
-    created_date=$(jq -r --arg email "$email" '.inbounds[0].settings.clients[] | select(.email == $email) | .metadata.created_date // "n/a"' "$CONFIG_FILE")
+    if [[ ${#emails[@]} -eq 0 ]]; then
+        echo -e "${YELLOW}⚠ Список пользователей пуст${NC}"
+        echo ""
+        read -p "Нажмите Enter для возврата в меню..."
+        return
+    fi
     
+    echo -e "${CYAN}ВЫБЕРИТЕ ПОЛЬЗОВАТЕЛЯ:${NC}"
     echo ""
+    for i in "${!emails[@]}"; do
+        echo "  $((i+1)). ${emails[$i]}"
+    done
+    echo ""
+    read -p "Введите номер (или 0 для отмены): " choice
+    
+    if [[ "$choice" == "0" ]]; then
+        return
+    fi
+    
+    if ! [[ "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#emails[@]} )); then
+        echo -e "${RED}✗ Неверный выбор${NC}"
+        sleep 2
+        return
+    fi
+    
+    local selected_email="${emails[$((choice - 1))]}"
+    local stats=$(get_user_stats "$selected_email")
+    local uplink=$(echo "$stats" | awk '{print $1}')
+    local downlink=$(echo "$stats" | awk '{print $2}')
+    local total=$((uplink + downlink))
+    
+    local uuid=$(jq -r --arg email "$selected_email" '.inbounds[0].settings.clients[] | select(.email == $email) | .id' "$CONFIG_FILE")
+    local subscription=$(jq -r --arg email "$selected_email" '.inbounds[0].settings.clients[] | select(.email == $email) | .metadata.subscription // "n/a"' "$CONFIG_FILE")
+    local created_date=$(jq -r --arg email "$selected_email" '.inbounds[0].settings.clients[] | select(.email == $email) | .metadata.created_date // "n/a"' "$CONFIG_FILE")
+    
+    clear_screen
     echo -e "${BLUE}╔════════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${BLUE}║              ДЕТАЛЬНАЯ ИНФОРМАЦИЯ О ПОЛЬЗОВАТЕЛЕ              ║${NC}"
     echo -e "${BLUE}╚════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
-    echo -e "${CYAN}Пользователь:${NC}    $email"
+    echo -e "${CYAN}Пользователь:${NC}    $selected_email"
     echo -e "${CYAN}UUID:${NC}            $uuid"
     echo -e "${CYAN}Подписка:${NC}        $subscription"
     echo -e "${CYAN}Дата создания:${NC}   $created_date"
@@ -300,171 +482,146 @@ show_user_detail() {
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
     echo -e "${CYAN}Трафик:${NC}"
-    echo -e "  ↑ Отправлено:     $(bytes_to_human $uplink) ${YELLOW}($uplink bytes)${NC}"
-    echo -e "  ↓ Получено:       $(bytes_to_human $downlink) ${YELLOW}($downlink bytes)${NC}"
-    echo -e "  ${CYAN}Σ Всего:${NC}          ${GREEN}$(bytes_to_human $total)${NC} ${YELLOW}($total bytes)${NC}"
+    echo -e "  ↑ Отправлено:     $(bytes_to_human $uplink)"
+    echo -e "  ↓ Получено:       $(bytes_to_human $downlink)"
+    echo -e "  ${CYAN}Σ Всего:${NC}          ${GREEN}$(bytes_to_human $total)${NC}"
     echo ""
+    read -p "Нажмите Enter для возврата в меню..."
 }
 
-# Функция сброса статистики
-reset_stats() {
-    local email=$1
+# Меню сброса статистики
+reset_menu() {
+    clear_screen
+    echo -e "${CYAN}СБРОС СТАТИСТИКИ${NC}"
+    echo ""
+    echo "  1. Сбросить статистику всех пользователей"
+    echo "  2. Сбросить статистику конкретного пользователя"
+    echo "  0. Назад"
+    echo ""
+    read -p "Выберите опцию: " choice
     
-    if [[ -n "$email" ]]; then
-        if ! jq -e --arg email "$email" '.inbounds[0].settings.clients[] | select(.email == $email)' "$CONFIG_FILE" > /dev/null 2>&1; then
-            echo -e "${RED}✗ Пользователь '$email' не найден${NC}"
-            exit 1
-        fi
-        
-        reset_user_stats "$email"
-        echo -e "${GREEN}✓ Статистика пользователя '$email' сброшена${NC}"
-    else
-        local emails=($(jq -r '.inbounds[0].settings.clients[].email' "$CONFIG_FILE" 2>/dev/null))
-        
-        for email in "${emails[@]}"; do
-            reset_user_stats "$email"
-        done
-        
-        echo -e "${GREEN}✓ Статистика всех пользователей сброшена${NC}"
-    fi
+    case $choice in
+        1)
+            read -p "Вы уверены? Это сбросит статистику ВСЕХ пользователей (y/n): " confirm
+            if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
+                reset_all_stats
+                echo -e "${GREEN}✓ Статистика всех пользователей сброшена${NC}"
+                sleep 2
+            fi
+            ;;
+        2)
+            local emails=($(jq -r '.inbounds[0].settings.clients[].email' "$CONFIG_FILE" 2>/dev/null))
+            clear_screen
+            echo -e "${CYAN}ВЫБЕРИТЕ ПОЛЬЗОВАТЕЛЯ:${NC}"
+            echo ""
+            for i in "${!emails[@]}"; do
+                echo "  $((i+1)). ${emails[$i]}"
+            done
+            echo ""
+            read -p "Введите номер (или 0 для отмены): " user_choice
+            
+            if [[ "$user_choice" != "0" ]] && [[ "$user_choice" =~ ^[0-9]+$ ]] && (( user_choice >= 1 && user_choice <= ${#emails[@]} )); then
+                local selected_email="${emails[$((user_choice - 1))]}"
+                reset_user_stats "$selected_email"
+                echo -e "${GREEN}✓ Статистика пользователя '$selected_email' сброшена${NC}"
+                sleep 2
+            fi
+            ;;
+        0)
+            return
+            ;;
+    esac
 }
 
-# Функция проверки статуса Stats API
+# Проверка статуса
 check_status() {
-    echo ""
-    echo -e "${BLUE}╔════════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BLUE}║                  ПРОВЕРКА STATS API XRAY                      ║${NC}"
-    echo -e "${BLUE}╚════════════════════════════════════════════════════════════════╝${NC}"
+    clear_screen
+    echo -e "${CYAN}ПРОВЕРКА СИСТЕМЫ${NC}"
     echo ""
     
     if check_stats_api; then
-        echo -e "${GREEN}✓ Stats API настроен в конфигурации${NC}"
+        echo -e "${GREEN}✓${NC} Stats API настроен в конфигурации"
     else
-        echo -e "${RED}✗ Stats API не настроен в конфигурации${NC}"
-        echo -e "${YELLOW}  Используйте: xray-traffic-monitor -i${NC}"
-        return 1
+        echo -e "${RED}✗${NC} Stats API не настроен в конфигурации"
     fi
     
     if systemctl is-active --quiet xray; then
-        echo -e "${GREEN}✓ Xray работает${NC}"
+        echo -e "${GREEN}✓${NC} Xray работает"
     else
-        echo -e "${RED}✗ Xray не запущен${NC}"
-        return 1
+        echo -e "${RED}✗${NC} Xray не запущен"
     fi
     
     if ss -tlnp 2>/dev/null | grep -q ":$API_PORT"; then
-        echo -e "${GREEN}✓ API порт $API_PORT открыт${NC}"
+        echo -e "${GREEN}✓${NC} API порт $API_PORT открыт"
     else
-        echo -e "${RED}✗ API порт $API_PORT не открыт${NC}"
-        return 1
+        echo -e "${RED}✗${NC} API порт $API_PORT не открыт"
     fi
     
     if xray api statsquery --server="$API_SERVER" > /dev/null 2>&1; then
-        echo -e "${GREEN}✓ API отвечает на запросы${NC}"
+        echo -e "${GREEN}✓${NC} API отвечает на запросы"
     else
-        echo -e "${RED}✗ API не отвечает на запросы${NC}"
-        return 1
+        echo -e "${RED}✗${NC} API не отвечает на запросы"
     fi
     
     echo ""
-    echo -e "${GREEN}Stats API полностью функционален!${NC}"
+    
+    # Проверка наличия пользователей
+    local user_count=$(jq '.inbounds[0].settings.clients | length' "$CONFIG_FILE" 2>/dev/null)
+    echo -e "${CYAN}Пользователей:${NC} $user_count"
+    
+    # Версия Xray
+    local xray_version=$(xray version 2>/dev/null | head -1)
+    echo -e "${CYAN}Версия Xray:${NC} $xray_version"
+    
     echo ""
+    read -p "Нажмите Enter для возврата в меню..."
 }
 
-# Функция отображения помощи
-show_help() {
-    cat << 'HELP'
-
-╔════════════════════════════════════════════════════════════════╗
-║         XRAY TRAFFIC MONITOR - Мониторинг трафика Xray        ║
-╚════════════════════════════════════════════════════════════════╝
-
-Использование:
-    xray-traffic-monitor [ОПЦИЯ] [АРГУМЕНТ]
-
-Опции:
-    -s, --show              Показать статистику всех пользователей
-    -u, --user <email>      Показать детальную статистику пользователя
-    -r, --reset [email]     Сбросить статистику (всех или конкретного)
-    -i, --install           Установить/настроить Stats API
-    -c, --check             Проверить статус Stats API
-    -h, --help              Показать эту справку
-
-Примеры:
-    xray-traffic-monitor -s
-        Показать статистику всех пользователей
-
-    xray-traffic-monitor -u main
-        Показать детальную статистику пользователя main
-
-    xray-traffic-monitor -r
-        Сбросить статистику всех пользователей
-
-    xray-traffic-monitor -r john
-        Сбросить статистику пользователя john
-
-    xray-traffic-monitor -i
-        Установить и настроить Stats API
-
-    xray-traffic-monitor -c
-        Проверить статус Stats API
-
-Примечания:
-    • Stats API должен быть настроен для работы мониторинга
-    • Используйте -i для автоматической настройки
-    • Статистика сбрасывается при перезапуске Xray
-    • Все изменения конфига сохраняются в резервную копию
-
-HELP
+# Главное меню
+main_menu() {
+    while true; do
+        clear_screen
+        echo -e "${CYAN}ГЛАВНОЕ МЕНЮ${NC}"
+        echo ""
+        echo "  ${GREEN}1.${NC} Мониторинг в реальном времени"
+        echo "  ${GREEN}2.${NC} Просмотр общей статистики"
+        echo "  ${GREEN}3.${NC} Детали по пользователю"
+        echo "  ${GREEN}4.${NC} Сброс статистики"
+        echo "  ${GREEN}5.${NC} Настроить Stats API"
+        echo "  ${GREEN}6.${NC} Проверка системы"
+        echo "  ${GREEN}0.${NC} Выход"
+        echo ""
+        read -p "Выберите опцию: " choice
+        
+        case $choice in
+            1) realtime_monitor ;;
+            2) view_stats ;;
+            3) view_user_detail ;;
+            4) reset_menu ;;
+            5) setup_stats_api ;;
+            6) check_status ;;
+            0) 
+                clear
+                echo -e "${GREEN}До свидания!${NC}"
+                exit 0
+                ;;
+            *)
+                echo -e "${RED}✗ Неверный выбор${NC}"
+                sleep 1
+                ;;
+        esac
+    done
 }
 
-# Основная логика
-case "${1}" in
-    -s|--show)
-        if ! check_stats_api; then
-            echo -e "${RED}✗ Stats API не настроен!${NC}"
-            echo -e "${YELLOW}Используйте: xray-traffic-monitor -i${NC}"
-            exit 1
-        fi
-        show_stats
-        ;;
-    -u|--user)
-        if [[ -z "$2" ]]; then
-            echo -e "${RED}✗ Укажите имя пользователя${NC}"
-            echo -e "Использование: xray-traffic-monitor -u <email>"
-            exit 1
-        fi
-        if ! check_stats_api; then
-            echo -e "${RED}✗ Stats API не настроен!${NC}"
-            echo -e "${YELLOW}Используйте: xray-traffic-monitor -i${NC}"
-            exit 1
-        fi
-        show_user_detail "$2"
-        ;;
-    -r|--reset)
-        if ! check_stats_api; then
-            echo -e "${RED}✗ Stats API не настроен!${NC}"
-            echo -e "${YELLOW}Используйте: xray-traffic-monitor -i${NC}"
-            exit 1
-        fi
-        reset_stats "$2"
-        ;;
-    -i|--install)
-        setup_stats_api
-        echo ""
-        echo -e "${GREEN}Готово! Теперь используйте:${NC}"
-        echo -e "  ${CYAN}xray-traffic-monitor -s${NC}      # показать статистику"
-        echo -e "  ${CYAN}xray-traffic-monitor -u main${NC}  # детали пользователя"
-        echo ""
-        ;;
-    -c|--check)
-        check_status
-        ;;
-    -h|--help|*)
-        show_help
-        ;;
-esac
-EOF
+# Запуск
+if [[ ! -f "$CONFIG_FILE" ]]; then
+    clear_screen
+    echo -e "${RED}✗ Конфиг Xray не найден: $CONFIG_FILE${NC}"
+    exit 1
+fi
+
+main_menu
+MAINSCRIPT
 
 chmod +x /usr/local/bin/xray-traffic-monitor
 
@@ -474,18 +631,11 @@ echo -e "${BLUE}╔════════════════════�
 echo -e "${BLUE}║                   Установка завершена!                        ║${NC}"
 echo -e "${BLUE}╚════════════════════════════════════════════════════════════════╝${NC}"
 echo ""
-echo -e "${YELLOW}Быстрый старт:${NC}"
-echo -e "  ${CYAN}1.${NC} Настроить Stats API:"
-echo -e "     ${GREEN}xray-traffic-monitor -i${NC}"
+echo -e "${YELLOW}Запуск:${NC}"
+echo -e "  ${GREEN}xray-traffic-monitor${NC}"
 echo ""
-echo -e "  ${CYAN}2.${NC} Показать статистику:"
-echo -e "     ${GREEN}xray-traffic-monitor -s${NC}"
-echo ""
-echo -e "  ${CYAN}3.${NC} Детали пользователя:"
-echo -e "     ${GREEN}xray-traffic-monitor -u main${NC}"
-echo ""
-echo -e "  ${CYAN}4.${NC} Полная справка:"
-echo -e "     ${GREEN}xray-traffic-monitor -h${NC}"
-echo ""
-echo -e "${YELLOW}Примечание:${NC} Сначала выполните установку API командой ${GREEN}-i${NC}"
+echo -e "${YELLOW}Первый запуск:${NC}"
+echo -e "  1. Запустите скрипт"
+echo -e "  2. Выберите опцию ${GREEN}5${NC} для настройки Stats API"
+echo -e "  3. Затем используйте опцию ${GREEN}1${NC} для мониторинга в реальном времени"
 echo ""
