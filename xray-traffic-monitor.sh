@@ -526,12 +526,39 @@ realtime_monitor() {
     load_baserow_config
     
     clear_screen
-    echo -e "${CYAN}Установите интервал обновления (в секундах, по умолчанию 2):${NC}"
+    echo -e "${CYAN}Установите интервал обновления экрана (в секундах, по умолчанию 2):${NC}"
     read -p "> " interval
     interval=${interval:-2}
     
     if ! [[ "$interval" =~ ^[0-9]+$ ]] || (( interval < 1 )); then
         interval=2
+    fi
+    
+    # НОВОЕ: Настройка автосинхронизации с Baserow
+    local auto_sync_enabled=false
+    local sync_interval_minutes=0
+    local sync_counter=0
+    local sync_interval_seconds=0
+    
+    if [[ "$BASEROW_ENABLED" == "true" ]]; then
+        echo ""
+        echo -e "${YELLOW}Включить автоматическую синхронизацию с Baserow? (y/n):${NC}"
+        read -p "> " enable_sync
+        
+        if [[ "$enable_sync" == "y" || "$enable_sync" == "Y" ]]; then
+            echo -e "${CYAN}Интервал синхронизации в минутах (например: 5, 10, 30):${NC}"
+            read -p "> " sync_interval_minutes
+            
+            if [[ "$sync_interval_minutes" =~ ^[0-9]+$ ]] && (( sync_interval_minutes > 0 )); then
+                auto_sync_enabled=true
+                sync_interval_seconds=$((sync_interval_minutes * 60))
+                echo -e "${GREEN}✓ Автосинхронизация включена: каждые $sync_interval_minutes минут${NC}"
+                sleep 2
+            else
+                echo -e "${YELLOW}⚠ Некорректный интервал, автосинхронизация отключена${NC}"
+                sleep 2
+            fi
+        fi
     fi
     
     # Массивы для хранения предыдущих значений
@@ -548,6 +575,9 @@ realtime_monitor() {
         prev_downlink[$email]=$(echo "$stats" | awk '{print $2}')
     done
     
+    # Счётчик для автосинхронизации
+    local elapsed_seconds=0
+    
     while true; do
         # Обновляем список активных пользователей на каждой итерации
         local current_emails=($(jq -r '.inbounds[0].settings.clients[].email' "$CONFIG_FILE" 2>/dev/null))
@@ -556,13 +586,18 @@ realtime_monitor() {
         echo -e "${BLUE}╔════════════════════════════════════════════════════════════════════════════════════════════════════════╗${NC}"
         echo -e "${BLUE}║                     МОНИТОРИНГ В РЕАЛЬНОМ ВРЕМЕНИ (Обновление: ${interval}s)                                   ║${NC}"
         if [[ "$BASEROW_ENABLED" == "true" ]]; then
-            echo -e "${BLUE}║                     ${GREEN}✓ Baserow активен${BLUE} - статистика сохраняется между перезапусками                    ║${NC}"
+            if [[ "$auto_sync_enabled" == true ]]; then
+                local next_sync_in=$(( (sync_interval_seconds - (elapsed_seconds % sync_interval_seconds)) ))
+                echo -e "${BLUE}║      ${GREEN}✓ Baserow активен${BLUE} | Автосинхронизация: каждые ${sync_interval_minutes}м | След. синхр. через: ${next_sync_in}с           ║${NC}"
+            else
+                echo -e "${BLUE}║                     ${GREEN}✓ Baserow активен${BLUE} - статистика сохраняется между перезапусками                    ║${NC}"
+            fi
         else
             echo -e "${BLUE}║                     ${YELLOW}⚠ Baserow выключен${BLUE} - статистика НЕ сохраняется                                     ║${NC}"
         fi
         echo -e "${BLUE}╚════════════════════════════════════════════════════════════════════════════════════════════════════════╝${NC}"
         echo ""
-        echo -e "${YELLOW}Время:${NC} $(date '+%Y-%m-%d %H:%M:%S')    ${YELLOW}Активных пользователей:${NC} ${#current_emails[@]}    ${YELLOW}Нажмите Ctrl+C для выхода${NC}"
+        echo -e "${YELLOW}Время:${NC} $(date '+%Y-%m-%d %H:%M:%S')    ${YELLOW}Активных:${NC} ${#current_emails[@]}    ${YELLOW}Ctrl+C = выход${NC}"
         echo ""
         
         printf "${CYAN}%-20s %15s %15s %15s %15s %15s %15s${NC}\n" \
@@ -656,12 +691,41 @@ realtime_monitor() {
             "$(bytes_to_human $((total_session_up + total_session_down)))"
         
         echo ""
-        echo -e "${YELLOW}Легенда:${NC} ${GREEN}Зеленый${NC} = активное соединение (${active_count}) | ${NC}Белый${NC} = неактивен ($((${#current_emails[@]} - active_count)))"
+        echo -e "${YELLOW}Легенда:${NC} ${GREEN}Зеленый${NC} = активен (${active_count}) | ${NC}Белый${NC} = неактивен ($((${#current_emails[@]} - active_count)))"
         
         if [[ "$BASEROW_ENABLED" == "true" ]]; then
-            echo -e "${CYAN}ℹ ВСЕГО (БД)${NC} = суммарный трафик (включая предыдущие сессии) | ${CYAN}СЕССИЯ${NC} = текущая сессия Xray"
+            echo -e "${CYAN}ℹ ВСЕГО (БД)${NC} = суммарный трафик | ${CYAN}СЕССИЯ${NC} = текущая сессия Xray"
         else
             echo -e "${YELLOW}⚠ Baserow выключен - статистика обнулится при перезапуске Xray${NC}"
+        fi
+        
+        # НОВОЕ: Автосинхронизация
+        if [[ "$auto_sync_enabled" == true ]]; then
+            elapsed_seconds=$((elapsed_seconds + interval))
+            
+            # Проверяем, пора ли синхронизировать
+            if (( elapsed_seconds % sync_interval_seconds == 0 )); then
+                echo ""
+                echo -e "${YELLOW}⟳ Автоматическая синхронизация с Baserow...${NC}"
+                
+                local synced=0
+                for email in "${current_emails[@]}"; do
+                    local stats=$(get_user_stats "$email")
+                    local uplink=$(echo "$stats" | awk '{print $1}')
+                    local downlink=$(echo "$stats" | awk '{print $2}')
+                    local session_total=$((uplink + downlink))
+                    
+                    # ВАЖНО: Синхронизируем только если есть трафик > 1 MB
+                    if (( session_total > 1048576 )); then
+                        baserow_sync_user "$email" "$session_total" > /dev/null 2>&1
+                        reset_user_stats "$email"
+                        synced=$((synced + 1))
+                    fi
+                done
+                
+                echo -e "${GREEN}✓ Синхронизировано $synced пользователей${NC}"
+                sleep 2
+            fi
         fi
         
         sleep $interval
