@@ -236,6 +236,11 @@ baserow_sync_user() {
         return 0
     fi
     
+    # НЕ синхронизируем если трафик < 1 MB (защита от пустых записей)
+    if (( current_bytes < 1048576 )); then
+        return 0
+    fi
+    
     # Получаем сохраненные GB из Baserow
     local saved_gb=$(baserow_get_user_gb "$username")
     local saved_bytes=$(gb_to_bytes "$saved_gb")
@@ -249,7 +254,6 @@ baserow_sync_user() {
     
     echo "$total_bytes"
 }
-
 # Получить полный трафик пользователя (Baserow + текущая сессия)
 get_total_user_traffic() {
     local username=$1
