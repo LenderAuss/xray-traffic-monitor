@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # ============================================================================
-# Xray Traffic Monitor v3.1 - ПОЛНАЯ ВЕРСИЯ
-# С автосинхронизацией и персистентным хранением в Baserow
+# Xray Traffic Monitor v3.2 - ИСПРАВЛЕННАЯ ВЕРСИЯ
+# С улучшенной автосинхронизацией и обработкой ошибок
 # ============================================================================
 
 # Цвета
@@ -20,6 +20,7 @@ BASEROW_CONFIG="/usr/local/etc/xray/baserow.conf"
 API_PORT=10085
 API_SERVER="127.0.0.1:${API_PORT}"
 REFRESH_INTERVAL=2
+MIN_SYNC_BYTES=10485760  # 10 MB минимум для синхронизации
 
 # ============================================================================
 # БАЗОВЫЕ ФУНКЦИИ
@@ -45,7 +46,7 @@ EOF
 clear_screen() {
     clear
     echo -e "${BLUE}╔════════════════════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BLUE}║                  XRAY TRAFFIC MONITOR - Real-time v3.1                    ║${NC}"
+    echo -e "${BLUE}║                  XRAY TRAFFIC MONITOR - Real-time v3.2                    ║${NC}"
     echo -e "${BLUE}║         (Автосинхронизация + персистентное хранение в Baserow)            ║${NC}"
     echo -e "${BLUE}╚════════════════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
@@ -74,7 +75,8 @@ bytes_to_gb() {
         echo "0"
         return
     fi
-    printf "%.4f" $(echo "scale=4; $bytes / 1073741824" | bc)
+    # Увеличена точность до 6 знаков для предотвращения потери данных
+    printf "%.6f" $(echo "scale=6; $bytes / 1073741824" | bc)
 }
 
 gb_to_bytes() {
@@ -83,7 +85,8 @@ gb_to_bytes() {
         echo "0"
         return
     fi
-    printf "%.0f" $(echo "scale=0; $gb * 1073741824 / 1" | bc)
+    # Используем целочисленное деление для точности
+    printf "%.0f" $(echo "$gb * 1073741824" | bc)
 }
 
 bytes_per_sec() {
@@ -113,7 +116,12 @@ baserow_get_all_rows() {
     fi
     local response=$(curl -s -X GET \
         "https://api.baserow.io/api/database/rows/table/${BASEROW_TABLE_ID}/?user_field_names=true" \
-        -H "Authorization: Token ${BASEROW_TOKEN}")
+        -H "Authorization: Token ${BASEROW_TOKEN}" 2>/dev/null)
+    
+    if [[ -z "$response" ]]; then
+        echo ""
+        return 1
+    fi
     echo "$response"
 }
 
@@ -132,6 +140,8 @@ baserow_get_user_gb() {
     local user_row=$(baserow_get_user_row "$username")
     if [[ -n "$user_row" ]]; then
         local gb=$(echo "$user_row" | jq -r '.GB // "0"' 2>/dev/null)
+        # Очистка от возможных нечисловых значений
+        gb=$(echo "$gb" | grep -oE '[0-9]+(\.[0-9]+)?')
         echo "${gb:-0}"
     else
         echo "0"
@@ -141,67 +151,106 @@ baserow_get_user_gb() {
 baserow_create_row() {
     local username=$1
     local gb=$2
+    
     if [[ "$BASEROW_ENABLED" != "true" ]]; then
         return 1
     fi
-    if [[ -z "$gb" || "$gb" == "0" || "$gb" == "0.00" || "$gb" == "0.0000" ]]; then
+    
+    # Проверка валидности GB
+    if [[ -z "$gb" ]] || ! [[ "$gb" =~ ^[0-9]+\.?[0-9]*$ ]]; then
         return 0
     fi
+    
     local gb_check=$(echo "$gb > 0" | bc -l 2>/dev/null)
     if [[ "$gb_check" != "1" ]]; then
         return 0
     fi
-    curl -s -X POST \
+    
+    local response=$(curl -s -X POST \
         "https://api.baserow.io/api/database/rows/table/${BASEROW_TABLE_ID}/?user_field_names=true" \
         -H "Authorization: Token ${BASEROW_TOKEN}" \
         -H "Content-Type: application/json" \
-        -d "{\"user\": \"$username\", \"GB\": $gb}" > /dev/null 2>&1
+        -d "{\"user\": \"$username\", \"GB\": $gb}" 2>/dev/null)
+    
+    # Проверка успешности создания
+    if echo "$response" | jq -e '.id' > /dev/null 2>&1; then
+        return 0
+    else
+        return 1
+    fi
 }
 
 baserow_update_row() {
     local username=$1
     local gb=$2
+    
     if [[ "$BASEROW_ENABLED" != "true" ]]; then
         return 1
     fi
-    if [[ -z "$gb" || "$gb" == "0" || "$gb" == "0.00" || "$gb" == "0.0000" ]]; then
+    
+    # Проверка валидности GB
+    if [[ -z "$gb" ]] || ! [[ "$gb" =~ ^[0-9]+\.?[0-9]*$ ]]; then
         return 0
     fi
+    
     local user_row=$(baserow_get_user_row "$username")
     if [[ -n "$user_row" ]]; then
         local row_id=$(echo "$user_row" | jq -r '.id' 2>/dev/null)
         if [[ -n "$row_id" && "$row_id" != "null" ]]; then
-            curl -s -X PATCH \
+            local response=$(curl -s -X PATCH \
                 "https://api.baserow.io/api/database/rows/table/${BASEROW_TABLE_ID}/${row_id}/?user_field_names=true" \
                 -H "Authorization: Token ${BASEROW_TOKEN}" \
                 -H "Content-Type: application/json" \
-                -d "{\"GB\": $gb}" > /dev/null 2>&1
+                -d "{\"GB\": $gb}" 2>/dev/null)
+            
+            if echo "$response" | jq -e '.id' > /dev/null 2>&1; then
+                return 0
+            else
+                return 1
+            fi
         fi
     else
         baserow_create_row "$username" "$gb"
+        return $?
     fi
 }
 
 baserow_sync_user() {
     local username=$1
     local current_bytes=$2
+    
     if [[ "$BASEROW_ENABLED" != "true" ]]; then
+        echo "$current_bytes"
+        return 1
+    fi
+    
+    # Проверка минимального порога
+    if (( current_bytes < MIN_SYNC_BYTES )); then
+        local saved_gb=$(baserow_get_user_gb "$username")
+        local saved_bytes=$(gb_to_bytes "$saved_gb")
+        echo $((saved_bytes + current_bytes))
         return 0
     fi
-    if (( current_bytes < 10485760 )); then
-        return 0
-    fi
+    
     local saved_gb=$(baserow_get_user_gb "$username")
     local saved_bytes=$(gb_to_bytes "$saved_gb")
     local total_bytes=$((saved_bytes + current_bytes))
     local total_gb=$(bytes_to_gb "$total_bytes")
-    baserow_update_row "$username" "$total_gb"
-    echo "$total_bytes"
+    
+    if baserow_update_row "$username" "$total_gb"; then
+        echo "$total_bytes"
+        return 0
+    else
+        # В случае ошибки возвращаем текущую сумму без обновления
+        echo "$total_bytes"
+        return 1
+    fi
 }
 
 get_total_user_traffic() {
     local username=$1
     local current_bytes=$2
+    
     if [[ "$BASEROW_ENABLED" == "true" ]]; then
         local saved_gb=$(baserow_get_user_gb "$username")
         local saved_bytes=$(gb_to_bytes "$saved_gb")
@@ -214,15 +263,19 @@ get_total_user_traffic() {
 baserow_delete_user() {
     local username=$1
     local user_row=$(baserow_get_user_row "$username")
+    
     if [[ "$BASEROW_ENABLED" != "true" ]] || [[ -z "$user_row" ]]; then
         return 1
     fi
+    
     local row_id=$(echo "$user_row" | jq -r '.id' 2>/dev/null)
     if [[ -n "$row_id" && "$row_id" != "null" ]]; then
         curl -s -X DELETE \
             "https://api.baserow.io/api/database/rows/table/${BASEROW_TABLE_ID}/${row_id}/" \
             -H "Authorization: Token ${BASEROW_TOKEN}" > /dev/null 2>&1
+        return $?
     fi
+    return 1
 }
 
 # ============================================================================
@@ -259,7 +312,7 @@ setup_baserow() {
     
     local test_response=$(curl -s -X GET \
         "https://api.baserow.io/api/database/rows/table/${table_id}/?user_field_names=true" \
-        -H "Authorization: Token ${token}")
+        -H "Authorization: Token ${token}" 2>/dev/null)
     
     if echo "$test_response" | jq -e '.results' > /dev/null 2>&1; then
         echo -e "${GREEN}✓${NC} Подключение успешно!"
@@ -298,8 +351,10 @@ enable_baserow() {
         save_baserow_config "$BASEROW_TOKEN" "$BASEROW_TABLE_ID" "true"
         load_baserow_config
         echo -e "${GREEN}✓${NC} Baserow включен"
+        sleep 1
     else
         echo -e "${YELLOW}⚠${NC} Сначала настройте Baserow (опция 6)"
+        sleep 2
     fi
 }
 
@@ -399,14 +454,17 @@ get_user_stats() {
     local email=$1
     local uplink downlink
     local stats_output=$(xray api statsquery --server="$API_SERVER" 2>/dev/null)
+    
     uplink=$(echo "$stats_output" | grep "user>>>$email>>>traffic>>>uplink" -A 3 | grep -oP '"value"\s*:\s*"\K\d+' | head -1)
     downlink=$(echo "$stats_output" | grep "user>>>$email>>>traffic>>>downlink" -A 3 | grep -oP '"value"\s*:\s*"\K\d+' | head -1)
+    
     if [[ -z "$uplink" ]]; then
         uplink=$(echo "$stats_output" | jq -r '.stat[] | select(.name | contains("user>>>'"$email"'>>>traffic>>>uplink")) | .value // "0"' 2>/dev/null | head -1)
     fi
     if [[ -z "$downlink" ]]; then
         downlink=$(echo "$stats_output" | jq -r '.stat[] | select(.name | contains("user>>>'"$email"'>>>traffic>>>downlink")) | .value // "0"' 2>/dev/null | head -1)
     fi
+    
     uplink=${uplink:-0}
     downlink=${downlink:-0}
     echo "$uplink $downlink"
@@ -614,6 +672,7 @@ realtime_monitor() {
                 
                 local synced=0
                 local skipped=0
+                local errors=0
                 
                 for email in "${current_emails[@]}"; do
                     local stats=$(get_user_stats "$email")
@@ -621,14 +680,21 @@ realtime_monitor() {
                     local downlink=$(echo "$stats" | awk '{print $2}')
                     local session_total=$((uplink + downlink))
                     
-                    if (( session_total >= 10485760 )); then
+                    if (( session_total >= MIN_SYNC_BYTES )); then
                         echo -e "${YELLOW}  ⟳${NC} Синхронизация $email ($(bytes_to_human $session_total))..."
+                        
                         if baserow_sync_user "$email" "$session_total" > /dev/null 2>&1; then
+                            # Успешная синхронизация - сбрасываем счетчики Xray
                             reset_user_stats "$email"
                             synced=$((synced + 1))
                             echo -e "${GREEN}    ✓ Успешно${NC}"
+                            
+                            # ВАЖНО: Обнуляем предыдущие значения для корректного расчета скорости
+                            prev_uplink[$email]=0
+                            prev_downlink[$email]=0
                         else
                             echo -e "${RED}    ✗ Ошибка${NC}"
+                            errors=$((errors + 1))
                         fi
                     else
                         skipped=$((skipped + 1))
@@ -637,6 +703,9 @@ realtime_monitor() {
                 
                 echo ""
                 echo -e "${GREEN}✓ Синхронизировано:${NC} $synced | ${CYAN}Пропущено (< 10 MB):${NC} $skipped"
+                if (( errors > 0 )); then
+                    echo -e "${RED}✗ Ошибок:${NC} $errors"
+                fi
                 sleep 3
             fi
         fi
@@ -660,7 +729,7 @@ view_stats() {
     
     load_baserow_config
     clear_screen
-    echo -e "${CYAN}ОБЩАЯ СТАТИСТИКА (Только активные пользователи)${NC}"
+    echo -e "${CYAN}ОБЩАЯ СТАТИСТИКА${NC}"
     echo ""
     
     local emails=($(jq -r '.inbounds[0].settings.clients[].email' "$CONFIG_FILE" 2>/dev/null))
@@ -855,6 +924,7 @@ sync_to_baserow() {
     
     local synced_count=0
     local error_count=0
+    local skipped_count=0
     
     for email in "${emails[@]}"; do
         local stats=$(get_user_stats "$email")
@@ -862,10 +932,10 @@ sync_to_baserow() {
         local downlink=$(echo "$stats" | awk '{print $2}')
         local session_total=$((uplink + downlink))
         
-        if (( session_total >= 10485760 )); then
+        if (( session_total >= MIN_SYNC_BYTES )); then
             echo -e "${YELLOW}⟳${NC} Синхронизация $email..."
             
-            if baserow_sync_user "$email" "$session_total" > /dev/null; then
+            if baserow_sync_user "$email" "$session_total" > /dev/null 2>&1; then
                 echo -e "${GREEN}  ✓${NC} Успешно ($(bytes_to_human $session_total))"
                 synced_count=$((synced_count + 1))
                 reset_user_stats "$email"
@@ -875,6 +945,7 @@ sync_to_baserow() {
             fi
         else
             echo -e "${CYAN}⊘${NC} Пропуск $email (< 10 MB)"
+            skipped_count=$((skipped_count + 1))
         fi
     done
     
@@ -884,6 +955,7 @@ sync_to_baserow() {
     echo -e "${GREEN}╚════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
     echo -e "${CYAN}Синхронизировано:${NC} $synced_count пользователей"
+    echo -e "${CYAN}Пропущено:${NC} $skipped_count пользователей"
     if (( error_count > 0 )); then
         echo -e "${RED}Ошибок:${NC} $error_count"
     fi
@@ -908,7 +980,7 @@ view_baserow_data() {
     
     local response=$(baserow_get_all_rows)
     
-    if ! echo "$response" | jq -e '.results' > /dev/null 2>&1; then
+    if [[ -z "$response" ]] || ! echo "$response" | jq -e '.results' > /dev/null 2>&1; then
         echo -e "${RED}✗ Ошибка получения данных из Baserow${NC}"
         echo ""
         read -p "Нажмите Enter для возврата в меню..."
@@ -1053,13 +1125,13 @@ check_status() {
             
             local test_response=$(curl -s -X GET \
                 "https://api.baserow.io/api/database/rows/table/${BASEROW_TABLE_ID}/?user_field_names=true&size=1" \
-                -H "Authorization: Token ${BASEROW_TOKEN}")
+                -H "Authorization: Token ${BASEROW_TOKEN}" 2>/dev/null)
             
             if echo "$test_response" | jq -e '.results' > /dev/null 2>&1; then
                 echo -e "${GREEN}✓${NC} Подключение к Baserow работает"
                 local row_count=$(curl -s -X GET \
                     "https://api.baserow.io/api/database/rows/table/${BASEROW_TABLE_ID}/?user_field_names=true" \
-                    -H "Authorization: Token ${BASEROW_TOKEN}" | jq '.count')
+                    -H "Authorization: Token ${BASEROW_TOKEN}" 2>/dev/null | jq '.count')
                 echo -e "${CYAN}  Записей в Baserow:${NC} $row_count"
             else
                 echo -e "${RED}✗${NC} Ошибка подключения к Baserow"
