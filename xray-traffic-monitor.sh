@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # ============================================================================
-# Xray Traffic Monitor - Интерактивный мониторинг трафика в реальном времени
-# Установка: wget -O - https://raw.githubusercontent.com/YOUR_REPO/xray-traffic-monitor.sh | bash
+# Xray Traffic Monitor v2.1 - Показывает только АКТИВНЫХ пользователей
+# Обновление: исключает удалённых пользователей, синхронизация с config.json
 # ============================================================================
 
 set -e
@@ -17,7 +17,7 @@ MAGENTA='\033[0;35m'
 NC='\033[0m'
 
 echo -e "${BLUE}╔════════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${BLUE}║         Установка Xray Traffic Monitor v2.0                   ║${NC}"
+echo -e "${BLUE}║         Установка Xray Traffic Monitor v2.1                   ║${NC}"
 echo -e "${BLUE}╚════════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 
@@ -72,7 +72,8 @@ REFRESH_INTERVAL=2
 clear_screen() {
     clear
     echo -e "${BLUE}╔════════════════════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BLUE}║                  XRAY TRAFFIC MONITOR - Real-time v2.0                    ║${NC}"
+    echo -e "${BLUE}║                  XRAY TRAFFIC MONITOR - Real-time v2.1                    ║${NC}"
+    echo -e "${BLUE}║                    (Только активные пользователи)                         ║${NC}"
     echo -e "${BLUE}╚════════════════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
 }
@@ -256,7 +257,7 @@ reset_all_stats() {
     done
 }
 
-# Мониторинг в реальном времени
+# Мониторинг в реальном времени (МОДЕРНИЗИРОВАННАЯ ВЕРСИЯ)
 realtime_monitor() {
     if ! check_stats_api; then
         clear_screen
@@ -283,6 +284,7 @@ realtime_monitor() {
     declare -A prev_uplink
     declare -A prev_downlink
     
+    # Получаем список АКТИВНЫХ пользователей из config.json
     local emails=($(jq -r '.inbounds[0].settings.clients[].email' "$CONFIG_FILE" 2>/dev/null))
     
     # Инициализация
@@ -293,12 +295,16 @@ realtime_monitor() {
     done
     
     while true; do
+        # ВАЖНО: Обновляем список активных пользователей на каждой итерации
+        local current_emails=($(jq -r '.inbounds[0].settings.clients[].email' "$CONFIG_FILE" 2>/dev/null))
+        
         clear
         echo -e "${BLUE}╔════════════════════════════════════════════════════════════════════════════════════════════════╗${NC}"
         echo -e "${BLUE}║                     МОНИТОРИНГ В РЕАЛЬНОМ ВРЕМЕНИ (Обновление: ${interval}s)                           ║${NC}"
+        echo -e "${BLUE}║                         (Показаны только активные пользователи)                                ║${NC}"
         echo -e "${BLUE}╚════════════════════════════════════════════════════════════════════════════════════════════════╝${NC}"
         echo ""
-        echo -e "${YELLOW}Время:${NC} $(date '+%Y-%m-%d %H:%M:%S')    ${YELLOW}Нажмите Ctrl+C для выхода${NC}"
+        echo -e "${YELLOW}Время:${NC} $(date '+%Y-%m-%d %H:%M:%S')    ${YELLOW}Активных пользователей:${NC} ${#current_emails[@]}    ${YELLOW}Нажмите Ctrl+C для выхода${NC}"
         echo ""
         
         printf "${CYAN}%-20s %15s %15s %15s %15s %15s${NC}\n" \
@@ -309,17 +315,27 @@ realtime_monitor() {
         local total_down=0
         local total_speed_up=0
         local total_speed_down=0
+        local active_count=0
         
-        for email in "${emails[@]}"; do
+        # Обрабатываем ТОЛЬКО активных пользователей
+        for email in "${current_emails[@]}"; do
             local stats=$(get_user_stats "$email")
             local uplink=$(echo "$stats" | awk '{print $1}')
             local downlink=$(echo "$stats" | awk '{print $2}')
+            
+            # Инициализируем prev значения если пользователь новый
+            if [[ -z "${prev_uplink[$email]}" ]]; then
+                prev_uplink[$email]=0
+            fi
+            if [[ -z "${prev_downlink[$email]}" ]]; then
+                prev_downlink[$email]=0
+            fi
             
             # Вычисляем скорость
             local speed_up=$((uplink - prev_uplink[$email]))
             local speed_down=$((downlink - prev_downlink[$email]))
             
-            # Если скорость отрицательная (после сброса), обнуляем
+            # Если скорость отрицательная (после сброса или удаления), обнуляем
             if (( speed_up < 0 )); then speed_up=0; fi
             if (( speed_down < 0 )); then speed_down=0; fi
             
@@ -334,6 +350,7 @@ realtime_monitor() {
             local color=$NC
             if (( speed_up > 0 || speed_down > 0 )); then
                 color=$GREEN
+                active_count=$((active_count + 1))
             fi
             
             printf "${color}%-20s %15s %15s %15s %15s %15s${NC}\n" \
@@ -349,6 +366,21 @@ realtime_monitor() {
             prev_downlink[$email]=$downlink
         done
         
+        # Очищаем старые записи удалённых пользователей
+        for email in "${!prev_uplink[@]}"; do
+            local found=0
+            for current_email in "${current_emails[@]}"; do
+                if [[ "$email" == "$current_email" ]]; then
+                    found=1
+                    break
+                fi
+            done
+            if [[ $found -eq 0 ]]; then
+                unset prev_uplink[$email]
+                unset prev_downlink[$email]
+            fi
+        done
+        
         echo "────────────────────────────────────────────────────────────────────────────────────────────────────────"
         printf "${WHITE}%-20s %15s %15s %15s %15s %15s${NC}\n" \
             "ИТОГО:" \
@@ -359,7 +391,8 @@ realtime_monitor() {
             "$(bytes_per_sec $total_speed_down $interval)"
         
         echo ""
-        echo -e "${YELLOW}Легенда:${NC} ${GREEN}Зеленый${NC} = активное соединение | ${NC}Белый${NC} = неактивен"
+        echo -e "${YELLOW}Легенда:${NC} ${GREEN}Зеленый${NC} = активное соединение (${active_count}) | ${NC}Белый${NC} = неактивен ($((${#current_emails[@]} - active_count)))"
+        echo -e "${CYAN}ℹ Показаны только пользователи из config.json | Статистика обнуляется при перезапуске Xray${NC}"
         
         sleep $interval
     done
@@ -376,7 +409,7 @@ view_stats() {
     fi
     
     clear_screen
-    echo -e "${CYAN}ОБЩАЯ СТАТИСТИКА${NC}"
+    echo -e "${CYAN}ОБЩАЯ СТАТИСТИКА (Только активные пользователи)${NC}"
     echo ""
     
     local emails=($(jq -r '.inbounds[0].settings.clients[].email' "$CONFIG_FILE" 2>/dev/null))
@@ -418,6 +451,8 @@ view_stats() {
         "$(bytes_to_human $((total_up + total_down)))"
     
     echo ""
+    echo -e "${CYAN}ℹ Статистика обнуляется при перезапуске Xray${NC}"
+    echo ""
     read -p "Нажмите Enter для возврата в меню..."
 }
 
@@ -441,7 +476,7 @@ view_user_detail() {
         return
     fi
     
-    echo -e "${CYAN}ВЫБЕРИТЕ ПОЛЬЗОВАТЕЛЯ:${NC}"
+    echo -e "${CYAN}ВЫБЕРИТЕ ПОЛЬЗОВАТЕЛЯ (Только активные):${NC}"
     echo ""
     for i in "${!emails[@]}"; do
         echo "  $((i+1)). ${emails[$i]}"
@@ -481,7 +516,7 @@ view_user_detail() {
     echo ""
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
-    echo -e "${CYAN}Трафик:${NC}"
+    echo -e "${CYAN}Трафик (с последнего перезапуска Xray):${NC}"
     echo -e "  ↑ Отправлено:     $(bytes_to_human $uplink)"
     echo -e "  ↓ Получено:       $(bytes_to_human $downlink)"
     echo -e "  ${CYAN}Σ Всего:${NC}          ${GREEN}$(bytes_to_human $total)${NC}"
@@ -567,12 +602,14 @@ check_status() {
     
     # Проверка наличия пользователей
     local user_count=$(jq '.inbounds[0].settings.clients | length' "$CONFIG_FILE" 2>/dev/null)
-    echo -e "${CYAN}Пользователей:${NC} $user_count"
+    echo -e "${CYAN}Активных пользователей:${NC} $user_count"
     
     # Версия Xray
     local xray_version=$(xray version 2>/dev/null | head -1)
     echo -e "${CYAN}Версия Xray:${NC} $xray_version"
     
+    echo ""
+    echo -e "${YELLOW}ℹ  Статистика хранится в оперативной памяти и обнуляется при перезапуске Xray${NC}"
     echo ""
     read -p "Нажмите Enter для возврата в меню..."
 }
@@ -634,8 +671,14 @@ echo ""
 echo -e "${YELLOW}Запуск:${NC}"
 echo -e "  ${GREEN}xray-traffic-monitor${NC}"
 echo ""
+echo -e "${YELLOW}Новое в v2.1:${NC}"
+echo -e "  ✅ Показывает только АКТИВНЫХ пользователей из config.json"
+echo -e "  ✅ Автоматически скрывает удалённых пользователей"
+echo -e "  ✅ Динамическое обновление списка при добавлении/удалении"
+echo -e "  ℹ️  Статистика обнуляется при перезапуске Xray (это нормально)"
+echo ""
 echo -e "${YELLOW}Первый запуск:${NC}"
 echo -e "  1. Запустите скрипт"
-echo -e "  2. Выберите опцию ${GREEN}5${NC} для настройки Stats API"
-echo -e "  3. Затем используйте опцию ${GREEN}1${NC} для мониторинга в реальном времени"
+echo -e "  2. Выберите опцию ${GREEN}5${NC} для настройки Stats API (если ещё не настроено)"
+echo -e "  3. Используйте опцию ${GREEN}1${NC} для мониторинга в реальном времени"
 echo ""
