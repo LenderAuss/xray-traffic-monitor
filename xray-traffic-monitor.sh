@@ -1167,7 +1167,7 @@ main_menu() {
         if [[ "$BASEROW_ENABLED" == "true" ]]; then
             echo -e "${GREEN}● Baserow активен${NC}"
         else
-            echo -e "${YELLOW}○ Baserow выключен${NC}"
+            echo -e "${YELLOW}○ Baserow выключеН${NC}"
         fi
         echo ""
         echo -e "${CYAN}ГЛАВНОЕ МЕНЮ${NC}"
