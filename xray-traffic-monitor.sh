@@ -76,7 +76,7 @@ BASEROW_TOKEN="zoJjilyrKAVe42EAV57kBOEQGc8izU1t"
 BASEROW_TABLE_ID="742631"
 
 # ===== SERVER SETTINGS =====
-SERVER_NAME="UK"            # Имя сервера (UK, USA-1, EU-London, Asia-Tokyo и т.д.)
+SERVER_NAME=""            # Имя сервера (UK, USA-1, EU-London, Asia-Tokyo и т.д.)
 
 # ===== MONITOR SETTINGS =====
 REFRESH_INTERVAL=2          # Интервал обновления экрана (секунды)
@@ -457,11 +457,12 @@ auto_setup() {
             echo -e "${CYAN}║              НАСТРОЙКА ИМЕНИ СЕРВЕРА                          ║${NC}"
             echo -e "${CYAN}╚════════════════════════════════════════════════════════════════╝${NC}"
             echo ""
-            echo -e "${YELLOW}Введите имя этого сервера (например: UK, USA-1, EU-London):${NC}"
+            echo -e "${YELLOW}Введите имя этого сервера (например: UK, USA-1, EU-London, vp):${NC}"
+            echo -e "${YELLOW}Оставьте пустым для использования hostname ($(hostname)):${NC}"
             read -p "> " server_input
-            
+
             if [[ -z "$server_input" ]]; then
-                server_input="$(hostname)"
+              server_input="$(hostname)"  # ← УБРАЛИ "Server-"
             fi
             
             save_server_name "$server_input"
