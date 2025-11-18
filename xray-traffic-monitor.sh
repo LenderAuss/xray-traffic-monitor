@@ -38,12 +38,19 @@ load_config() {
             exit 1
         fi
         
+        # Проверка имени сервера
+        if [[ -z "$SERVER_NAME" ]]; then
+            echo -e "${YELLOW}⚠${NC} Внимание: SERVER_NAME не указан в конфиге"
+            echo -e "${YELLOW}   Будет запрошен при первом запуске${NC}"
+        fi
+        
         # Устанавливаем значения по умолчанию если не указаны
         REFRESH_INTERVAL=${REFRESH_INTERVAL:-2}
         SYNC_INTERVAL=${SYNC_INTERVAL:-5}
         MIN_SYNC_MB=${MIN_SYNC_MB:-10}
         MIN_SYNC_BYTES=$((MIN_SYNC_MB * 1048576))
         
+        echo -e "${CYAN}  → Server Name:${NC} ${SERVER_NAME:-'не задан (будет запрошен)'}"
         echo -e "${CYAN}  → Baserow Table ID:${NC} $BASEROW_TABLE_ID"
         echo -e "${CYAN}  → Интервал обновления:${NC} ${REFRESH_INTERVAL}s"
         echo -e "${CYAN}  → Интервал синхронизации:${NC} ${SYNC_INTERVAL}m"
@@ -67,6 +74,9 @@ create_default_config() {
 # ===== BASEROW SETTINGS =====
 BASEROW_TOKEN="zoJjilyrKAVe42EAV57kBOEQGc8izU1t"
 BASEROW_TABLE_ID="742631"
+
+# ===== SERVER SETTINGS =====
+SERVER_NAME="UK"            # Имя сервера (UK, USA-1, EU-London, Asia-Tokyo и т.д.)
 
 # ===== MONITOR SETTINGS =====
 REFRESH_INTERVAL=2          # Интервал обновления экрана (секунды)
@@ -412,24 +422,31 @@ auto_setup() {
     
     echo ""
     
-    # Запрос имени сервера
-    if ! load_server_name || [[ -z "$SERVER_NAME" ]]; then
-        echo -e "${CYAN}╔════════════════════════════════════════════════════════════════╗${NC}"
-        echo -e "${CYAN}║              НАСТРОЙКА ИМЕНИ СЕРВЕРА                          ║${NC}"
-        echo -e "${CYAN}╚════════════════════════════════════════════════════════════════╝${NC}"
-        echo ""
-        echo -e "${YELLOW}Введите имя этого сервера (например: USA-1, EU-London, Asia-Tokyo):${NC}"
-        read -p "> " server_input
-        
-        if [[ -z "$server_input" ]]; then
-            server_input="Server-$(hostname)"
-        fi
-        
-        save_server_name "$server_input"
-        load_server_name
-        echo -e "${GREEN}✓${NC} Имя сервера сохранено: ${CYAN}$SERVER_NAME${NC}"
+    # Проверка имени сервера из конфига
+    if [[ -n "$SERVER_NAME" ]]; then
+        # Имя сервера есть в config.conf - используем его
+        save_server_name "$SERVER_NAME"
+        echo -e "${GREEN}✓${NC} Имя сервера из конфига: ${CYAN}$SERVER_NAME${NC}"
     else
-        echo -e "${GREEN}✓${NC} Имя сервера: ${CYAN}$SERVER_NAME${NC}"
+        # Имя сервера не задано в config.conf - спрашиваем
+        if ! load_server_name || [[ -z "$SERVER_NAME" ]]; then
+            echo -e "${CYAN}╔════════════════════════════════════════════════════════════════╗${NC}"
+            echo -e "${CYAN}║              НАСТРОЙКА ИМЕНИ СЕРВЕРА                          ║${NC}"
+            echo -e "${CYAN}╚════════════════════════════════════════════════════════════════╝${NC}"
+            echo ""
+            echo -e "${YELLOW}Введите имя этого сервера (например: UK, USA-1, EU-London):${NC}"
+            read -p "> " server_input
+            
+            if [[ -z "$server_input" ]]; then
+                server_input="Server-$(hostname)"
+            fi
+            
+            save_server_name "$server_input"
+            SERVER_NAME="$server_input"
+            echo -e "${GREEN}✓${NC} Имя сервера сохранено: ${CYAN}$SERVER_NAME${NC}"
+        else
+            echo -e "${GREEN}✓${NC} Имя сервера: ${CYAN}$SERVER_NAME${NC}"
+        fi
     fi
     
     echo ""
@@ -546,8 +563,14 @@ cleanup_and_sync() {
     echo -e "${YELLOW}║     Завершение работы - синхронизация данных с Baserow        ║${NC}"
     echo -e "${YELLOW}╚════════════════════════════════════════════════════════════════╝${NC}"
     
-    load_server_name
-    sync_all_users
+    if [[ -n "$SERVER_NAME" ]]; then
+        sync_all_users
+    else
+        load_server_name
+        if [[ -n "$SERVER_NAME" ]]; then
+            sync_all_users
+        fi
+    fi
     
     echo ""
     echo -e "${GREEN}До свидания!${NC}"
@@ -565,7 +588,10 @@ realtime_monitor_auto() {
         return 1
     fi
     
-    load_server_name
+    # Загружаем имя сервера если не загружено
+    if [[ -z "$SERVER_NAME" ]]; then
+        load_server_name
+    fi
     
     local interval=$REFRESH_INTERVAL
     local sync_interval_minutes=$SYNC_INTERVAL
