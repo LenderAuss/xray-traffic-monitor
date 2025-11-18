@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # ============================================================================
-# Xray Traffic Monitor v3.3 - АВТОМАТИЧЕСКИЙ РЕЖИМ
-# С поддержкой multi-server и фильтрацией по подписке
+# Xray Traffic Monitor v3.3 - ФИНАЛЬНАЯ ВЕРСИЯ
+# Полностью автоматический режим с systemd интеграцией
 # ============================================================================
 
 # Цвета
@@ -23,7 +23,7 @@ API_SERVER="127.0.0.1:${API_PORT}"
 REFRESH_INTERVAL=2
 MIN_SYNC_BYTES=10485760  # 10 MB минимум для синхронизации
 
-# Встроенные настройки Baserow (можно изменить)
+# Встроенные настройки Baserow
 DEFAULT_BASEROW_TOKEN="zoJjilyrKAVe42EAV57kBOEQGc8izU1t"
 DEFAULT_BASEROW_TABLE_ID="742631"
 
@@ -31,7 +31,6 @@ DEFAULT_BASEROW_TABLE_ID="742631"
 # БАЗОВЫЕ ФУНКЦИИ
 # ============================================================================
 
-# Функция извлечения имени пользователя (всё до первого _)
 extract_username() {
     local full_name=$1
     if [[ "$full_name" == *"_"* ]]; then
@@ -489,12 +488,62 @@ reset_all_stats() {
 }
 
 # ============================================================================
-# МОНИТОРИНГ В РЕАЛЬНОМ ВРЕМЕНИ
+# СИНХРОНИЗАЦИЯ ВСЕХ ПОЛЬЗОВАТЕЛЕЙ
 # ============================================================================
 
-realtime_monitor() {
+sync_all_users() {
+    local emails=($(jq -r '.inbounds[0].settings.clients[].email' "$CONFIG_FILE" 2>/dev/null))
+    local synced=0
+    local skipped=0
+    
+    for email in "${emails[@]}"; do
+        if ! has_valid_subscription "$email"; then
+            continue
+        fi
+        
+        local stats=$(get_user_stats "$email")
+        local uplink=$(echo "$stats" | awk '{print $1}')
+        local downlink=$(echo "$stats" | awk '{print $2}')
+        local session_total=$((uplink + downlink))
+        
+        # Синхронизируем даже если меньше 10 MB (при выходе сохраняем все)
+        if (( session_total > 0 )); then
+            if baserow_sync_user "$email" "$SERVER_NAME" "$session_total" > /dev/null 2>&1; then
+                reset_user_stats "$email"
+                synced=$((synced + 1))
+            fi
+        else
+            skipped=$((skipped + 1))
+        fi
+    done
+    
+    echo -e "${GREEN}✓${NC} Синхронизировано: $synced | Пропущено: $skipped"
+}
+
+cleanup_and_sync() {
+    echo ""
+    echo -e "${YELLOW}╔════════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${YELLOW}║     Завершение работы - синхронизация данных с Baserow        ║${NC}"
+    echo -e "${YELLOW}╚════════════════════════════════════════════════════════════════╝${NC}"
+    
+    if [[ "$BASEROW_ENABLED" == "true" ]]; then
+        load_server_name
+        sync_all_users
+    fi
+    
+    echo ""
+    echo -e "${GREEN}До свидания!${NC}"
+}
+
+# Устанавливаем trap для корректного завершения
+trap cleanup_and_sync EXIT INT TERM
+
+# ============================================================================
+# МОНИТОРИНГ В РЕАЛЬНОМ ВРЕМЕНИ (АВТОМАТИЧЕСКИЙ РЕЖИМ)
+# ============================================================================
+
+realtime_monitor_auto() {
     if ! check_stats_api; then
-        clear_screen
         echo -e "${RED}✗ Stats API не настроен!${NC}"
         return 1
     fi
@@ -502,42 +551,21 @@ realtime_monitor() {
     load_baserow_config
     load_server_name
     
-    clear_screen
-    echo -e "${CYAN}Установите интервал обновления экрана (в секундах, по умолчанию 2):${NC}"
-    read -p "> " interval
-    interval=${interval:-2}
+    # Автоматические настройки (без запросов)
+    local interval=2
+    local auto_sync_enabled=true
+    local sync_interval_minutes=5
+    local sync_interval_seconds=300
     
-    if ! [[ "$interval" =~ ^[0-9]+$ ]] || (( interval < 1 )); then
-        interval=2
-    fi
-    
-    local auto_sync_enabled=false
-    local sync_interval_minutes=0
-    local sync_interval_seconds=0
-    
-    if [[ "$BASEROW_ENABLED" == "true" ]]; then
-        echo ""
-        echo -e "${YELLOW}Включить автоматическую синхронизацию с Baserow? (y/n):${NC}"
-        read -p "> " enable_sync
-        
-        if [[ "$enable_sync" == "y" || "$enable_sync" == "Y" ]]; then
-            echo -e "${CYAN}Интервал синхронизации в минутах (рекомендуется: 5-60):${NC}"
-            read -p "> " sync_interval_minutes
-            
-            if [[ "$sync_interval_minutes" =~ ^[0-9]+$ ]] && (( sync_interval_minutes > 0 )); then
-                auto_sync_enabled=true
-                sync_interval_seconds=$((sync_interval_minutes * 60))
-                echo -e "${GREEN}✓ Автосинхронизация включена: каждые $sync_interval_minutes минут${NC}"
-                echo -e "${YELLOW}ℹ Минимальный трафик для синхронизации: 10 MB${NC}"
-                echo -e "${YELLOW}ℹ Пользователи без подписки (n/a) не синхронизируются${NC}"
-                echo -e "${CYAN}ℹ Формат имени: 123456_uk → записывается как '123456'${NC}"
-                sleep 3
-            else
-                echo -e "${YELLOW}⚠ Некорректный интервал, автосинхронизация отключена${NC}"
-                sleep 2
-            fi
-        fi
-    fi
+    echo -e "${CYAN}╔════════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║          АВТОМАТИЧЕСКИЙ РЕЖИМ МОНИТОРИНГА                     ║${NC}"
+    echo -e "${CYAN}╚════════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "${GREEN}✓${NC} Интервал обновления: ${interval}s"
+    echo -e "${GREEN}✓${NC} Автосинхронизация: каждые ${sync_interval_minutes} минут"
+    echo -e "${GREEN}✓${NC} Сервер: ${CYAN}$SERVER_NAME${NC}"
+    echo ""
+    sleep 2
     
     declare -A prev_uplink
     declare -A prev_downlink
@@ -559,18 +587,14 @@ realtime_monitor() {
         echo -e "${BLUE}╔════════════════════════════════════════════════════════════════════════════════════════════════════════╗${NC}"
         echo -e "${BLUE}║              МОНИТОРИНГ В РЕАЛЬНОМ ВРЕМЕНИ (Обновление: ${interval}s) | Сервер: ${SERVER_NAME}                    ║${NC}"
         if [[ "$BASEROW_ENABLED" == "true" ]]; then
-            if [[ "$auto_sync_enabled" == true ]]; then
-                local next_sync_in=$(( sync_interval_seconds - (elapsed_seconds % sync_interval_seconds) ))
-                echo -e "${BLUE}║      ${GREEN}✓ Baserow активен${BLUE} | Автосинхронизация: каждые ${sync_interval_minutes}м | След. синхр. через: ${next_sync_in}с           ║${NC}"
-            else
-                echo -e "${BLUE}║                     ${GREEN}✓ Baserow активен${BLUE} - статистика сохраняется между перезапусками                    ║${NC}"
-            fi
+            local next_sync_in=$(( sync_interval_seconds - (elapsed_seconds % sync_interval_seconds) ))
+            echo -e "${BLUE}║      ${GREEN}✓ Baserow активен${BLUE} | Автосинхронизация: каждые ${sync_interval_minutes}м | След. синхр. через: ${next_sync_in}с           ║${NC}"
         else
             echo -e "${BLUE}║                     ${YELLOW}⚠ Baserow выключен${BLUE} - статистика НЕ сохраняется                                     ║${NC}"
         fi
         echo -e "${BLUE}╚════════════════════════════════════════════════════════════════════════════════════════════════════════╝${NC}"
         echo ""
-        echo -e "${YELLOW}Время:${NC} $(date '+%Y-%m-%d %H:%M:%S')    ${YELLOW}Всего:${NC} ${#current_emails[@]}    ${YELLOW}Ctrl+C = выход${NC}"
+        echo -e "${YELLOW}Время:${NC} $(date '+%Y-%m-%d %H:%M:%S')    ${YELLOW}Всего:${NC} ${#current_emails[@]}    ${YELLOW}systemctl stop xray-monitor = остановка${NC}"
         echo ""
         
         printf "${CYAN}%-25s %10s %15s %15s %15s %15s %15s %15s${NC}\n" \
@@ -591,7 +615,6 @@ realtime_monitor() {
             local subscription=$(get_user_subscription "$email")
             local db_name=$(extract_username "$email")
             
-            # Форматируем отображение: "full_email → db_name" если есть _, иначе просто email
             local display_name="$email"
             if [[ "$email" == *"_"* ]]; then
                 display_name="$email → $db_name"
@@ -669,62 +692,58 @@ realtime_monitor() {
         
         if [[ "$BASEROW_ENABLED" == "true" ]]; then
             echo -e "${CYAN}ℹ ВСЕГО (БД)${NC} = суммарный трафик | ${CYAN}→${NC} = имя в БД (всё до _) | ${RED}Подписка n/a = не синхронизируется${NC}"
-        else
-            echo -e "${YELLOW}⚠ Baserow выключен - статистика обнулится при перезапуске Xray${NC}"
         fi
         
-        if [[ "$auto_sync_enabled" == true ]]; then
-            elapsed_seconds=$((elapsed_seconds + interval))
+        elapsed_seconds=$((elapsed_seconds + interval))
+        
+        if (( elapsed_seconds % sync_interval_seconds == 0 )); then
+            echo ""
+            echo -e "${MAGENTA}╔════════════════════════════════════════════════════════════════╗${NC}"
+            echo -e "${MAGENTA}║         АВТОМАТИЧЕСКАЯ СИНХРОНИЗАЦИЯ С BASEROW                ║${NC}"
+            echo -e "${MAGENTA}╚════════════════════════════════════════════════════════════════╝${NC}"
             
-            if (( elapsed_seconds % sync_interval_seconds == 0 )); then
-                echo ""
-                echo -e "${MAGENTA}╔════════════════════════════════════════════════════════════════╗${NC}"
-                echo -e "${MAGENTA}║         АВТОМАТИЧЕСКАЯ СИНХРОНИЗАЦИЯ С BASEROW                ║${NC}"
-                echo -e "${MAGENTA}╚════════════════════════════════════════════════════════════════╝${NC}"
-                
-                local synced=0
-                local skipped=0
-                local errors=0
-                local no_subscription=0
-                
-                for email in "${current_emails[@]}"; do
-                    if ! has_valid_subscription "$email"; then
-                        no_subscription=$((no_subscription + 1))
-                        continue
-                    fi
-                    
-                    local stats=$(get_user_stats "$email")
-                    local uplink=$(echo "$stats" | awk '{print $1}')
-                    local downlink=$(echo "$stats" | awk '{print $2}')
-                    local session_total=$((uplink + downlink))
-                    local db_name=$(extract_username "$email")
-                    
-                    if (( session_total >= MIN_SYNC_BYTES )); then
-                        echo -e "${YELLOW}  ⟳${NC} Синхронизация $email → ${CYAN}$db_name${NC} ($(bytes_to_human $session_total))..."
-                        
-                        if baserow_sync_user "$email" "$SERVER_NAME" "$session_total" > /dev/null 2>&1; then
-                            reset_user_stats "$email"
-                            synced=$((synced + 1))
-                            echo -e "${GREEN}    ✓ Успешно${NC}"
-                            
-                            prev_uplink[$email]=0
-                            prev_downlink[$email]=0
-                        else
-                            echo -e "${RED}    ✗ Ошибка${NC}"
-                            errors=$((errors + 1))
-                        fi
-                    else
-                        skipped=$((skipped + 1))
-                    fi
-                done
-                
-                echo ""
-                echo -e "${GREEN}✓ Синхронизировано:${NC} $synced | ${CYAN}Пропущено (< 10 MB):${NC} $skipped | ${RED}Без подписки:${NC} $no_subscription"
-                if (( errors > 0 )); then
-                    echo -e "${RED}✗ Ошибок:${NC} $errors"
+            local synced=0
+            local skipped=0
+            local errors=0
+            local no_subscription=0
+            
+            for email in "${current_emails[@]}"; do
+                if ! has_valid_subscription "$email"; then
+                    no_subscription=$((no_subscription + 1))
+                    continue
                 fi
-                sleep 3
+                
+                local stats=$(get_user_stats "$email")
+                local uplink=$(echo "$stats" | awk '{print $1}')
+                local downlink=$(echo "$stats" | awk '{print $2}')
+                local session_total=$((uplink + downlink))
+                local db_name=$(extract_username "$email")
+                
+                if (( session_total >= MIN_SYNC_BYTES )); then
+                    echo -e "${YELLOW}  ⟳${NC} Синхронизация $email → ${CYAN}$db_name${NC} ($(bytes_to_human $session_total))..."
+                    
+                    if baserow_sync_user "$email" "$SERVER_NAME" "$session_total" > /dev/null 2>&1; then
+                        reset_user_stats "$email"
+                        synced=$((synced + 1))
+                        echo -e "${GREEN}    ✓ Успешно${NC}"
+                        
+                        prev_uplink[$email]=0
+                        prev_downlink[$email]=0
+                    else
+                        echo -e "${RED}    ✗ Ошибка${NC}"
+                        errors=$((errors + 1))
+                    fi
+                else
+                    skipped=$((skipped + 1))
+                fi
+            done
+            
+            echo ""
+            echo -e "${GREEN}✓ Синхронизировано:${NC} $synced | ${CYAN}Пропущено (< 10 MB):${NC} $skipped | ${RED}Без подписки:${NC} $no_subscription"
+            if (( errors > 0 )); then
+                echo -e "${RED}✗ Ошибок:${NC} $errors"
             fi
+            sleep 3
         fi
         
         sleep $interval
@@ -745,4 +764,4 @@ fi
 auto_setup
 
 # Автоматический запуск мониторинга
-realtime_monitor
+realtime_monitor_auto
