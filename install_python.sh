@@ -18,10 +18,10 @@ WHITE='\033[1;37m'
 NC='\033[0m'
 
 # URLs
-REPO_BASE="https://raw.githubusercontent.com/LenderAuss/xray-traffic-monitor/main/python-version"
+REPO_BASE="https://raw.githubusercontent.com/LenderAuss/xray-traffic-monitor/main"
 SCRIPT_URL="${REPO_BASE}/xray_monitor.py"
 CONFIG_URL="${REPO_BASE}/monitor_config.conf"
-REQUIREMENTS_URL="${REPO_BASE}/requirements.txt"
+REQUIREMENTS_URL="${REPO_BASE}/requirements.txt""
 
 # Пути установки
 INSTALL_DIR="/opt/xray-monitor"
