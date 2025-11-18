@@ -1,8 +1,7 @@
 #!/bin/bash
 
 # ============================================================================
-# Xray Traffic Monitor v3.3 - ФИНАЛЬНАЯ ВЕРСИЯ
-# Полностью автоматический режим с systemd интеграцией
+# Xray Traffic Monitor v3.4 - С поддержкой конфигурационного файла
 # ============================================================================
 
 # Цвета
@@ -15,17 +14,67 @@ MAGENTA='\033[0;35m'
 WHITE='\033[1;37m'
 NC='\033[0m'
 
-CONFIG_FILE="/usr/local/etc/xray/config.json"
-BASEROW_CONFIG="/usr/local/etc/xray/baserow.conf"
-SERVER_CONFIG="/usr/local/etc/xray/server.conf"
+# Пути
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_PATH="${SCRIPT_DIR}/config.conf"
+XRAY_CONFIG="/usr/local/etc/xray/config.json"
+BASEROW_CONFIG_FILE="/usr/local/etc/xray/baserow.conf"
+SERVER_CONFIG_FILE="/usr/local/etc/xray/server.conf"
 API_PORT=10085
 API_SERVER="127.0.0.1:${API_PORT}"
-REFRESH_INTERVAL=2
-MIN_SYNC_BYTES=10485760  # 10 MB минимум для синхронизации
 
-# Встроенные настройки Baserow
-DEFAULT_BASEROW_TOKEN="zoJjilyrKAVe42EAV57kBOEQGc8izU1t"
-DEFAULT_BASEROW_TABLE_ID="742631"
+# ============================================================================
+# ЗАГРУЗКА КОНФИГУРАЦИИ
+# ============================================================================
+
+load_config() {
+    if [[ -f "$CONFIG_PATH" ]]; then
+        source "$CONFIG_PATH"
+        echo -e "${GREEN}✓${NC} Конфигурация загружена из: ${CYAN}$CONFIG_PATH${NC}"
+        
+        # Проверка обязательных параметров
+        if [[ -z "$BASEROW_TOKEN" ]] || [[ -z "$BASEROW_TABLE_ID" ]]; then
+            echo -e "${RED}✗${NC} Ошибка: не указаны BASEROW_TOKEN или BASEROW_TABLE_ID в конфиге"
+            exit 1
+        fi
+        
+        # Устанавливаем значения по умолчанию если не указаны
+        REFRESH_INTERVAL=${REFRESH_INTERVAL:-2}
+        SYNC_INTERVAL=${SYNC_INTERVAL:-5}
+        MIN_SYNC_MB=${MIN_SYNC_MB:-10}
+        MIN_SYNC_BYTES=$((MIN_SYNC_MB * 1048576))
+        
+        echo -e "${CYAN}  → Baserow Table ID:${NC} $BASEROW_TABLE_ID"
+        echo -e "${CYAN}  → Интервал обновления:${NC} ${REFRESH_INTERVAL}s"
+        echo -e "${CYAN}  → Интервал синхронизации:${NC} ${SYNC_INTERVAL}m"
+        echo -e "${CYAN}  → Минимум для синхр:${NC} ${MIN_SYNC_MB}MB"
+        echo ""
+        return 0
+    else
+        echo -e "${YELLOW}⚠${NC} Конфиг не найден: $CONFIG_PATH"
+        echo -e "${YELLOW}Создаю конфиг по умолчанию...${NC}"
+        create_default_config
+        load_config
+    fi
+}
+
+create_default_config() {
+    cat > "$CONFIG_PATH" << 'EOF'
+# ============================================================================
+# Xray Traffic Monitor - Configuration File v3.4
+# ============================================================================
+
+# ===== BASEROW SETTINGS =====
+BASEROW_TOKEN="zoJjilyrKAVe42EAV57kBOEQGc8izU1t"
+BASEROW_TABLE_ID="742631"
+
+# ===== MONITOR SETTINGS =====
+REFRESH_INTERVAL=2          # Интервал обновления экрана (секунды)
+SYNC_INTERVAL=5             # Интервал автосинхронизации (минуты)
+MIN_SYNC_MB=10              # Минимальный трафик для синхронизации (MB)
+EOF
+    echo -e "${GREEN}✓${NC} Создан конфиг: $CONFIG_PATH"
+}
 
 # ============================================================================
 # БАЗОВЫЕ ФУНКЦИИ
@@ -40,42 +89,39 @@ extract_username() {
     fi
 }
 
-load_baserow_config() {
-    if [[ -f "$BASEROW_CONFIG" ]]; then
-        source "$BASEROW_CONFIG"
-        return 0
-    fi
-    return 1
+load_baserow_from_config() {
+    # Сохраняем данные из config.conf в baserow.conf для совместимости
+    save_baserow_config "$BASEROW_TOKEN" "$BASEROW_TABLE_ID" "true"
 }
 
 save_baserow_config() {
-    cat > "$BASEROW_CONFIG" << EOF
+    cat > "$BASEROW_CONFIG_FILE" << EOF
 BASEROW_TOKEN="$1"
 BASEROW_TABLE_ID="$2"
 BASEROW_ENABLED="$3"
 EOF
-    chmod 600 "$BASEROW_CONFIG"
+    chmod 600 "$BASEROW_CONFIG_FILE"
 }
 
 load_server_name() {
-    if [[ -f "$SERVER_CONFIG" ]]; then
-        source "$SERVER_CONFIG"
+    if [[ -f "$SERVER_CONFIG_FILE" ]]; then
+        source "$SERVER_CONFIG_FILE"
         return 0
     fi
     return 1
 }
 
 save_server_name() {
-    cat > "$SERVER_CONFIG" << EOF
+    cat > "$SERVER_CONFIG_FILE" << EOF
 SERVER_NAME="$1"
 EOF
-    chmod 600 "$SERVER_CONFIG"
+    chmod 600 "$SERVER_CONFIG_FILE"
 }
 
 clear_screen() {
     clear
     echo -e "${BLUE}╔════════════════════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BLUE}║                  XRAY TRAFFIC MONITOR - Real-time v3.3                    ║${NC}"
+    echo -e "${BLUE}║                  XRAY TRAFFIC MONITOR v3.4                                ║${NC}"
     echo -e "${BLUE}║       (Multi-server + Автосинхронизация + Фильтр по подписке)            ║${NC}"
     echo -e "${BLUE}╚════════════════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
@@ -138,9 +184,6 @@ bytes_per_sec() {
 # ============================================================================
 
 baserow_get_all_rows() {
-    if [[ "$BASEROW_ENABLED" != "true" ]]; then
-        return 1
-    fi
     local response=$(curl -s -X GET \
         "https://api.baserow.io/api/database/rows/table/${BASEROW_TABLE_ID}/?user_field_names=true" \
         -H "Authorization: Token ${BASEROW_TOKEN}" 2>/dev/null)
@@ -185,10 +228,6 @@ baserow_create_row() {
     local gb=$3
     local username=$(extract_username "$full_email")
     
-    if [[ "$BASEROW_ENABLED" != "true" ]]; then
-        return 1
-    fi
-    
     if [[ -z "$gb" ]] || ! [[ "$gb" =~ ^[0-9]+\.?[0-9]*$ ]]; then
         return 0
     fi
@@ -216,10 +255,6 @@ baserow_update_row() {
     local server=$2
     local gb=$3
     local username=$(extract_username "$full_email")
-    
-    if [[ "$BASEROW_ENABLED" != "true" ]]; then
-        return 1
-    fi
     
     if [[ -z "$gb" ]] || ! [[ "$gb" =~ ^[0-9]+\.?[0-9]*$ ]]; then
         return 0
@@ -252,11 +287,6 @@ baserow_sync_user() {
     local server=$2
     local current_bytes=$3
     
-    if [[ "$BASEROW_ENABLED" != "true" ]]; then
-        echo "$current_bytes"
-        return 1
-    fi
-    
     if (( current_bytes < MIN_SYNC_BYTES )); then
         local saved_gb=$(baserow_get_user_gb "$full_email" "$server")
         local saved_bytes=$(gb_to_bytes "$saved_gb")
@@ -283,13 +313,9 @@ get_total_user_traffic() {
     local server=$2
     local current_bytes=$3
     
-    if [[ "$BASEROW_ENABLED" == "true" ]]; then
-        local saved_gb=$(baserow_get_user_gb "$full_email" "$server")
-        local saved_bytes=$(gb_to_bytes "$saved_gb")
-        echo $((saved_bytes + current_bytes))
-    else
-        echo "$current_bytes"
-    fi
+    local saved_gb=$(baserow_get_user_gb "$full_email" "$server")
+    local saved_bytes=$(gb_to_bytes "$saved_gb")
+    echo $((saved_bytes + current_bytes))
 }
 
 baserow_delete_user() {
@@ -297,7 +323,7 @@ baserow_delete_user() {
     local server=$2
     local user_row=$(baserow_get_user_row "$full_email" "$server")
     
-    if [[ "$BASEROW_ENABLED" != "true" ]] || [[ -z "$user_row" ]]; then
+    if [[ -z "$user_row" ]]; then
         return 1
     fi
     
@@ -323,20 +349,20 @@ auto_setup() {
         echo -e "${YELLOW}⚙ Stats API не настроен. Выполняется автоматическая настройка...${NC}"
         echo ""
         
-        cp "$CONFIG_FILE" "${CONFIG_FILE}.backup.$(date +%Y%m%d_%H%M%S)"
+        cp "$XRAY_CONFIG" "${XRAY_CONFIG}.backup.$(date +%Y%m%d_%H%M%S)"
         
-        if ! jq -e '.stats' "$CONFIG_FILE" > /dev/null 2>&1; then
-            jq '. + {"stats": {}}' "$CONFIG_FILE" > /tmp/xray_config.tmp && mv /tmp/xray_config.tmp "$CONFIG_FILE"
+        if ! jq -e '.stats' "$XRAY_CONFIG" > /dev/null 2>&1; then
+            jq '. + {"stats": {}}' "$XRAY_CONFIG" > /tmp/xray_config.tmp && mv /tmp/xray_config.tmp "$XRAY_CONFIG"
         fi
         
-        if ! jq -e '.api' "$CONFIG_FILE" > /dev/null 2>&1; then
-            jq '. + {"api": {"tag": "api", "services": ["StatsService"]}}' "$CONFIG_FILE" > /tmp/xray_config.tmp && mv /tmp/xray_config.tmp "$CONFIG_FILE"
+        if ! jq -e '.api' "$XRAY_CONFIG" > /dev/null 2>&1; then
+            jq '. + {"api": {"tag": "api", "services": ["StatsService"]}}' "$XRAY_CONFIG" > /tmp/xray_config.tmp && mv /tmp/xray_config.tmp "$XRAY_CONFIG"
         fi
         
-        jq '.policy.levels."0" += {"statsUserUplink": true, "statsUserDownlink": true}' "$CONFIG_FILE" > /tmp/xray_config.tmp && mv /tmp/xray_config.tmp "$CONFIG_FILE"
-        jq '.policy.system = {"statsInboundUplink": true, "statsInboundDownlink": true}' "$CONFIG_FILE" > /tmp/xray_config.tmp && mv /tmp/xray_config.tmp "$CONFIG_FILE"
+        jq '.policy.levels."0" += {"statsUserUplink": true, "statsUserDownlink": true}' "$XRAY_CONFIG" > /tmp/xray_config.tmp && mv /tmp/xray_config.tmp "$XRAY_CONFIG"
+        jq '.policy.system = {"statsInboundUplink": true, "statsInboundDownlink": true}' "$XRAY_CONFIG" > /tmp/xray_config.tmp && mv /tmp/xray_config.tmp "$XRAY_CONFIG"
         
-        api_exists=$(jq '.inbounds[] | select(.tag == "api")' "$CONFIG_FILE")
+        api_exists=$(jq '.inbounds[] | select(.tag == "api")' "$XRAY_CONFIG")
         if [[ -z "$api_exists" ]]; then
             jq --argjson api_inbound '{
                 "listen": "127.0.0.1",
@@ -344,24 +370,24 @@ auto_setup() {
                 "protocol": "dokodemo-door",
                 "settings": {"address": "127.0.0.1"},
                 "tag": "api"
-            }' '.inbounds += [$api_inbound]' "$CONFIG_FILE" > /tmp/xray_config.tmp && mv /tmp/xray_config.tmp "$CONFIG_FILE"
+            }' '.inbounds += [$api_inbound]' "$XRAY_CONFIG" > /tmp/xray_config.tmp && mv /tmp/xray_config.tmp "$XRAY_CONFIG"
         fi
         
-        api_route_exists=$(jq '.routing.rules[] | select(.inboundTag[0] == "api")' "$CONFIG_FILE" 2>/dev/null)
+        api_route_exists=$(jq '.routing.rules[] | select(.inboundTag[0] == "api")' "$XRAY_CONFIG" 2>/dev/null)
         if [[ -z "$api_route_exists" ]]; then
             jq --argjson api_rule '{
                 "type": "field",
                 "inboundTag": ["api"],
                 "outboundTag": "api"
-            }' '.routing.rules += [$api_rule]' "$CONFIG_FILE" > /tmp/xray_config.tmp && mv /tmp/xray_config.tmp "$CONFIG_FILE"
+            }' '.routing.rules += [$api_rule]' "$XRAY_CONFIG" > /tmp/xray_config.tmp && mv /tmp/xray_config.tmp "$XRAY_CONFIG"
         fi
         
-        api_outbound_exists=$(jq '.outbounds[] | select(.tag == "api")' "$CONFIG_FILE")
+        api_outbound_exists=$(jq '.outbounds[] | select(.tag == "api")' "$XRAY_CONFIG")
         if [[ -z "$api_outbound_exists" ]]; then
             jq --argjson api_outbound '{
                 "protocol": "freedom",
                 "tag": "api"
-            }' '.outbounds += [$api_outbound]' "$CONFIG_FILE" > /tmp/xray_config.tmp && mv /tmp/xray_config.tmp "$CONFIG_FILE"
+            }' '.outbounds += [$api_outbound]' "$XRAY_CONFIG" > /tmp/xray_config.tmp && mv /tmp/xray_config.tmp "$XRAY_CONFIG"
         fi
         
         systemctl restart xray
@@ -379,15 +405,10 @@ auto_setup() {
     
     echo ""
     
-    # Настройка Baserow
-    if ! load_baserow_config || [[ "$BASEROW_ENABLED" != "true" ]]; then
-        echo -e "${YELLOW}⚙ Настройка Baserow...${NC}"
-        save_baserow_config "$DEFAULT_BASEROW_TOKEN" "$DEFAULT_BASEROW_TABLE_ID" "true"
-        load_baserow_config
-        echo -e "${GREEN}✓${NC} Baserow настроен"
-    else
-        echo -e "${GREEN}✓${NC} Baserow уже настроен"
-    fi
+    # Настройка Baserow из конфига
+    echo -e "${YELLOW}⚙ Настройка Baserow из конфига...${NC}"
+    load_baserow_from_config
+    echo -e "${GREEN}✓${NC} Baserow настроен"
     
     echo ""
     
@@ -427,7 +448,7 @@ get_user_subscription() {
     local email=$1
     local subscription=$(jq -r --arg email "$email" \
         '.inbounds[0].settings.clients[] | select(.email == $email) | .metadata.subscription // "n/a"' \
-        "$CONFIG_FILE")
+        "$XRAY_CONFIG")
     echo "$subscription"
 }
 
@@ -445,10 +466,10 @@ has_valid_subscription() {
 # ============================================================================
 
 check_stats_api() {
-    if ! jq -e '.stats' "$CONFIG_FILE" > /dev/null 2>&1; then
+    if ! jq -e '.stats' "$XRAY_CONFIG" > /dev/null 2>&1; then
         return 1
     fi
-    if ! jq -e '.api.services[] | select(. == "StatsService")' "$CONFIG_FILE" > /dev/null 2>&1; then
+    if ! jq -e '.api.services[] | select(. == "StatsService")' "$XRAY_CONFIG" > /dev/null 2>&1; then
         return 1
     fi
     return 0
@@ -481,7 +502,7 @@ reset_user_stats() {
 }
 
 reset_all_stats() {
-    local emails=($(jq -r '.inbounds[0].settings.clients[].email' "$CONFIG_FILE" 2>/dev/null))
+    local emails=($(jq -r '.inbounds[0].settings.clients[].email' "$XRAY_CONFIG" 2>/dev/null))
     for email in "${emails[@]}"; do
         reset_user_stats "$email"
     done
@@ -492,7 +513,7 @@ reset_all_stats() {
 # ============================================================================
 
 sync_all_users() {
-    local emails=($(jq -r '.inbounds[0].settings.clients[].email' "$CONFIG_FILE" 2>/dev/null))
+    local emails=($(jq -r '.inbounds[0].settings.clients[].email' "$XRAY_CONFIG" 2>/dev/null))
     local synced=0
     local skipped=0
     
@@ -506,7 +527,6 @@ sync_all_users() {
         local downlink=$(echo "$stats" | awk '{print $2}')
         local session_total=$((uplink + downlink))
         
-        # Синхронизируем даже если меньше 10 MB (при выходе сохраняем все)
         if (( session_total > 0 )); then
             if baserow_sync_user "$email" "$SERVER_NAME" "$session_total" > /dev/null 2>&1; then
                 reset_user_stats "$email"
@@ -526,20 +546,17 @@ cleanup_and_sync() {
     echo -e "${YELLOW}║     Завершение работы - синхронизация данных с Baserow        ║${NC}"
     echo -e "${YELLOW}╚════════════════════════════════════════════════════════════════╝${NC}"
     
-    if [[ "$BASEROW_ENABLED" == "true" ]]; then
-        load_server_name
-        sync_all_users
-    fi
+    load_server_name
+    sync_all_users
     
     echo ""
     echo -e "${GREEN}До свидания!${NC}"
 }
 
-# Устанавливаем trap для корректного завершения
 trap cleanup_and_sync EXIT INT TERM
 
 # ============================================================================
-# МОНИТОРИНГ В РЕАЛЬНОМ ВРЕМЕНИ (АВТОМАТИЧЕСКИЙ РЕЖИМ)
+# МОНИТОРИНГ В РЕАЛЬНОМ ВРЕМЕНИ
 # ============================================================================
 
 realtime_monitor_auto() {
@@ -548,14 +565,11 @@ realtime_monitor_auto() {
         return 1
     fi
     
-    load_baserow_config
     load_server_name
     
-    # Автоматические настройки (без запросов)
-    local interval=2
-    local auto_sync_enabled=true
-    local sync_interval_minutes=5
-    local sync_interval_seconds=300
+    local interval=$REFRESH_INTERVAL
+    local sync_interval_minutes=$SYNC_INTERVAL
+    local sync_interval_seconds=$((sync_interval_minutes * 60))
     
     echo -e "${CYAN}╔════════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${CYAN}║          АВТОМАТИЧЕСКИЙ РЕЖИМ МОНИТОРИНГА                     ║${NC}"
@@ -563,6 +577,7 @@ realtime_monitor_auto() {
     echo ""
     echo -e "${GREEN}✓${NC} Интервал обновления: ${interval}s"
     echo -e "${GREEN}✓${NC} Автосинхронизация: каждые ${sync_interval_minutes} минут"
+    echo -e "${GREEN}✓${NC} Минимум для синхр: ${MIN_SYNC_MB} MB"
     echo -e "${GREEN}✓${NC} Сервер: ${CYAN}$SERVER_NAME${NC}"
     echo ""
     sleep 2
@@ -570,7 +585,7 @@ realtime_monitor_auto() {
     declare -A prev_uplink
     declare -A prev_downlink
     
-    local emails=($(jq -r '.inbounds[0].settings.clients[].email' "$CONFIG_FILE" 2>/dev/null))
+    local emails=($(jq -r '.inbounds[0].settings.clients[].email' "$XRAY_CONFIG" 2>/dev/null))
     
     for email in "${emails[@]}"; do
         local stats=$(get_user_stats "$email")
@@ -581,17 +596,13 @@ realtime_monitor_auto() {
     local elapsed_seconds=0
     
     while true; do
-        local current_emails=($(jq -r '.inbounds[0].settings.clients[].email' "$CONFIG_FILE" 2>/dev/null))
+        local current_emails=($(jq -r '.inbounds[0].settings.clients[].email' "$XRAY_CONFIG" 2>/dev/null))
         
         clear
         echo -e "${BLUE}╔════════════════════════════════════════════════════════════════════════════════════════════════════════╗${NC}"
         echo -e "${BLUE}║              МОНИТОРИНГ В РЕАЛЬНОМ ВРЕМЕНИ (Обновление: ${interval}s) | Сервер: ${SERVER_NAME}                    ║${NC}"
-        if [[ "$BASEROW_ENABLED" == "true" ]]; then
-            local next_sync_in=$(( sync_interval_seconds - (elapsed_seconds % sync_interval_seconds) ))
-            echo -e "${BLUE}║      ${GREEN}✓ Baserow активен${BLUE} | Автосинхронизация: каждые ${sync_interval_minutes}м | След. синхр. через: ${next_sync_in}с           ║${NC}"
-        else
-            echo -e "${BLUE}║                     ${YELLOW}⚠ Baserow выключен${BLUE} - статистика НЕ сохраняется                                     ║${NC}"
-        fi
+        local next_sync_in=$(( sync_interval_seconds - (elapsed_seconds % sync_interval_seconds) ))
+        echo -e "${BLUE}║      ${GREEN}✓ Baserow активен${BLUE} | Автосинхронизация: каждые ${sync_interval_minutes}м | След. синхр. через: ${next_sync_in}с           ║${NC}"
         echo -e "${BLUE}╚════════════════════════════════════════════════════════════════════════════════════════════════════════╝${NC}"
         echo ""
         echo -e "${YELLOW}Время:${NC} $(date '+%Y-%m-%d %H:%M:%S')    ${YELLOW}Всего:${NC} ${#current_emails[@]}    ${YELLOW}systemctl stop xray-monitor = остановка${NC}"
@@ -689,10 +700,7 @@ realtime_monitor_auto() {
         
         echo ""
         echo -e "${YELLOW}Легенда:${NC} ${GREEN}Зеленый${NC} = активен (${active_count}) | ${NC}Белый${NC} = неактивен ($((${#current_emails[@]} - active_count)))"
-        
-        if [[ "$BASEROW_ENABLED" == "true" ]]; then
-            echo -e "${CYAN}ℹ ВСЕГО (БД)${NC} = суммарный трафик | ${CYAN}→${NC} = имя в БД (всё до _) | ${RED}Подписка n/a = не синхронизируется${NC}"
-        fi
+        echo -e "${CYAN}ℹ ВСЕГО (БД)${NC} = суммарный трафик | ${CYAN}→${NC} = имя в БД (всё до _) | ${RED}Подписка n/a = не синхронизируется${NC}"
         
         elapsed_seconds=$((elapsed_seconds + interval))
         
@@ -739,7 +747,7 @@ realtime_monitor_auto() {
             done
             
             echo ""
-            echo -e "${GREEN}✓ Синхронизировано:${NC} $synced | ${CYAN}Пропущено (< 10 MB):${NC} $skipped | ${RED}Без подписки:${NC} $no_subscription"
+            echo -e "${GREEN}✓ Синхронизировано:${NC} $synced | ${CYAN}Пропущено (< ${MIN_SYNC_MB} MB):${NC} $skipped | ${RED}Без подписки:${NC} $no_subscription"
             if (( errors > 0 )); then
                 echo -e "${RED}✗ Ошибок:${NC} $errors"
             fi
@@ -754,14 +762,17 @@ realtime_monitor_auto() {
 # ЗАПУСК
 # ============================================================================
 
-if [[ ! -f "$CONFIG_FILE" ]]; then
+if [[ ! -f "$XRAY_CONFIG" ]]; then
     clear_screen
-    echo -e "${RED}✗ Конфиг Xray не найден: $CONFIG_FILE${NC}"
+    echo -e "${RED}✗ Конфиг Xray не найден: $XRAY_CONFIG${NC}"
     exit 1
 fi
 
-# Автоматическая настройка при первом запуске
+# Загружаем конфигурацию
+load_config
+
+# Автоматическая настройка
 auto_setup
 
-# Автоматический запуск мониторинга
+# Запуск мониторинга
 realtime_monitor_auto
