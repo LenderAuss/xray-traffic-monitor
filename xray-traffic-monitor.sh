@@ -31,6 +31,16 @@ DEFAULT_BASEROW_TABLE_ID="742631"
 # БАЗОВЫЕ ФУНКЦИИ
 # ============================================================================
 
+# Функция извлечения имени пользователя (всё до первого _)
+extract_username() {
+    local full_name=$1
+    if [[ "$full_name" == *"_"* ]]; then
+        echo "${full_name%%_*}"
+    else
+        echo "$full_name"
+    fi
+}
+
 load_baserow_config() {
     if [[ -f "$BASEROW_CONFIG" ]]; then
         source "$BASEROW_CONFIG"
@@ -144,8 +154,10 @@ baserow_get_all_rows() {
 }
 
 baserow_get_user_row() {
-    local username=$1
+    local full_email=$1
     local server=$2
+    local username=$(extract_username "$full_email")
+    
     local all_rows=$(baserow_get_all_rows)
     if [[ -z "$all_rows" ]]; then
         echo ""
@@ -156,9 +168,9 @@ baserow_get_user_row() {
 }
 
 baserow_get_user_gb() {
-    local username=$1
+    local full_email=$1
     local server=$2
-    local user_row=$(baserow_get_user_row "$username" "$server")
+    local user_row=$(baserow_get_user_row "$full_email" "$server")
     if [[ -n "$user_row" ]]; then
         local gb=$(echo "$user_row" | jq -r '.GB // "0"' 2>/dev/null)
         gb=$(echo "$gb" | grep -oE '[0-9]+(\.[0-9]+)?')
@@ -169,9 +181,10 @@ baserow_get_user_gb() {
 }
 
 baserow_create_row() {
-    local username=$1
+    local full_email=$1
     local server=$2
     local gb=$3
+    local username=$(extract_username "$full_email")
     
     if [[ "$BASEROW_ENABLED" != "true" ]]; then
         return 1
@@ -200,9 +213,10 @@ baserow_create_row() {
 }
 
 baserow_update_row() {
-    local username=$1
+    local full_email=$1
     local server=$2
     local gb=$3
+    local username=$(extract_username "$full_email")
     
     if [[ "$BASEROW_ENABLED" != "true" ]]; then
         return 1
@@ -212,7 +226,7 @@ baserow_update_row() {
         return 0
     fi
     
-    local user_row=$(baserow_get_user_row "$username" "$server")
+    local user_row=$(baserow_get_user_row "$full_email" "$server")
     if [[ -n "$user_row" ]]; then
         local row_id=$(echo "$user_row" | jq -r '.id' 2>/dev/null)
         if [[ -n "$row_id" && "$row_id" != "null" ]]; then
@@ -229,13 +243,13 @@ baserow_update_row() {
             fi
         fi
     else
-        baserow_create_row "$username" "$server" "$gb"
+        baserow_create_row "$full_email" "$server" "$gb"
         return $?
     fi
 }
 
 baserow_sync_user() {
-    local username=$1
+    local full_email=$1
     local server=$2
     local current_bytes=$3
     
@@ -245,18 +259,18 @@ baserow_sync_user() {
     fi
     
     if (( current_bytes < MIN_SYNC_BYTES )); then
-        local saved_gb=$(baserow_get_user_gb "$username" "$server")
+        local saved_gb=$(baserow_get_user_gb "$full_email" "$server")
         local saved_bytes=$(gb_to_bytes "$saved_gb")
         echo $((saved_bytes + current_bytes))
         return 0
     fi
     
-    local saved_gb=$(baserow_get_user_gb "$username" "$server")
+    local saved_gb=$(baserow_get_user_gb "$full_email" "$server")
     local saved_bytes=$(gb_to_bytes "$saved_gb")
     local total_bytes=$((saved_bytes + current_bytes))
     local total_gb=$(bytes_to_gb "$total_bytes")
     
-    if baserow_update_row "$username" "$server" "$total_gb"; then
+    if baserow_update_row "$full_email" "$server" "$total_gb"; then
         echo "$total_bytes"
         return 0
     else
@@ -266,12 +280,12 @@ baserow_sync_user() {
 }
 
 get_total_user_traffic() {
-    local username=$1
+    local full_email=$1
     local server=$2
     local current_bytes=$3
     
     if [[ "$BASEROW_ENABLED" == "true" ]]; then
-        local saved_gb=$(baserow_get_user_gb "$username" "$server")
+        local saved_gb=$(baserow_get_user_gb "$full_email" "$server")
         local saved_bytes=$(gb_to_bytes "$saved_gb")
         echo $((saved_bytes + current_bytes))
     else
@@ -280,9 +294,9 @@ get_total_user_traffic() {
 }
 
 baserow_delete_user() {
-    local username=$1
+    local full_email=$1
     local server=$2
-    local user_row=$(baserow_get_user_row "$username" "$server")
+    local user_row=$(baserow_get_user_row "$full_email" "$server")
     
     if [[ "$BASEROW_ENABLED" != "true" ]] || [[ -z "$user_row" ]]; then
         return 1
@@ -516,6 +530,7 @@ realtime_monitor() {
                 echo -e "${GREEN}✓ Автосинхронизация включена: каждые $sync_interval_minutes минут${NC}"
                 echo -e "${YELLOW}ℹ Минимальный трафик для синхронизации: 10 MB${NC}"
                 echo -e "${YELLOW}ℹ Пользователи без подписки (n/a) не синхронизируются${NC}"
+                echo -e "${CYAN}ℹ Формат имени: 123456_uk → записывается как '123456'${NC}"
                 sleep 3
             else
                 echo -e "${YELLOW}⚠ Некорректный интервал, автосинхронизация отключена${NC}"
@@ -558,9 +573,9 @@ realtime_monitor() {
         echo -e "${YELLOW}Время:${NC} $(date '+%Y-%m-%d %H:%M:%S')    ${YELLOW}Всего:${NC} ${#current_emails[@]}    ${YELLOW}Ctrl+C = выход${NC}"
         echo ""
         
-        printf "${CYAN}%-20s %10s %15s %15s %15s %15s %15s %15s${NC}\n" \
-            "ПОЛЬЗОВАТЕЛЬ" "ПОДПИСКА" "СЕССИЯ ↑" "СЕССИЯ ↓" "ВСЕГО (БД)" "СКОРОСТЬ ↑" "СКОРОСТЬ ↓" "ИТОГО"
-        echo "──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────"
+        printf "${CYAN}%-25s %10s %15s %15s %15s %15s %15s %15s${NC}\n" \
+            "ПОЛЬЗОВАТЕЛЬ (→БД)" "ПОДПИСКА" "СЕССИЯ ↑" "СЕССИЯ ↓" "ВСЕГО (БД)" "СКОРОСТЬ ↑" "СКОРОСТЬ ↓" "ИТОГО"
+        echo "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────"
         
         local total_session_up=0
         local total_session_down=0
@@ -574,6 +589,13 @@ realtime_monitor() {
             local uplink=$(echo "$stats" | awk '{print $1}')
             local downlink=$(echo "$stats" | awk '{print $2}')
             local subscription=$(get_user_subscription "$email")
+            local db_name=$(extract_username "$email")
+            
+            # Форматируем отображение: "full_email → db_name" если есть _, иначе просто email
+            local display_name="$email"
+            if [[ "$email" == *"_"* ]]; then
+                display_name="$email → $db_name"
+            fi
             
             if [[ -z "${prev_uplink[$email]}" ]]; then
                 prev_uplink[$email]=0
@@ -603,8 +625,8 @@ realtime_monitor() {
                 active_count=$((active_count + 1))
             fi
             
-            printf "${color}%-20s %10s %15s %15s %15s %15s %15s %15s${NC}\n" \
-                "$email" \
+            printf "${color}%-25s %10s %15s %15s %15s %15s %15s %15s${NC}\n" \
+                "$display_name" \
                 "$subscription" \
                 "$(bytes_to_human $uplink)" \
                 "$(bytes_to_human $downlink)" \
@@ -631,8 +653,8 @@ realtime_monitor() {
             fi
         done
         
-        echo "──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────"
-        printf "${WHITE}%-20s %10s %15s %15s %15s %15s %15s %15s${NC}\n" \
+        echo "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────"
+        printf "${WHITE}%-25s %10s %15s %15s %15s %15s %15s %15s${NC}\n" \
             "ИТОГО:" \
             "" \
             "$(bytes_to_human $total_session_up)" \
@@ -646,7 +668,7 @@ realtime_monitor() {
         echo -e "${YELLOW}Легенда:${NC} ${GREEN}Зеленый${NC} = активен (${active_count}) | ${NC}Белый${NC} = неактивен ($((${#current_emails[@]} - active_count)))"
         
         if [[ "$BASEROW_ENABLED" == "true" ]]; then
-            echo -e "${CYAN}ℹ ВСЕГО (БД)${NC} = суммарный трафик | ${CYAN}СЕССИЯ${NC} = текущая сессия | ${RED}Подписка n/a = не синхронизируется${NC}"
+            echo -e "${CYAN}ℹ ВСЕГО (БД)${NC} = суммарный трафик | ${CYAN}→${NC} = имя в БД (всё до _) | ${RED}Подписка n/a = не синхронизируется${NC}"
         else
             echo -e "${YELLOW}⚠ Baserow выключен - статистика обнулится при перезапуске Xray${NC}"
         fi
@@ -675,9 +697,10 @@ realtime_monitor() {
                     local uplink=$(echo "$stats" | awk '{print $1}')
                     local downlink=$(echo "$stats" | awk '{print $2}')
                     local session_total=$((uplink + downlink))
+                    local db_name=$(extract_username "$email")
                     
                     if (( session_total >= MIN_SYNC_BYTES )); then
-                        echo -e "${YELLOW}  ⟳${NC} Синхронизация $email ($(bytes_to_human $session_total))..."
+                        echo -e "${YELLOW}  ⟳${NC} Синхронизация $email → ${CYAN}$db_name${NC} ($(bytes_to_human $session_total))..."
                         
                         if baserow_sync_user "$email" "$SERVER_NAME" "$session_total" > /dev/null 2>&1; then
                             reset_user_stats "$email"
