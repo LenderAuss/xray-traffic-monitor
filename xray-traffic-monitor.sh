@@ -351,6 +351,10 @@ baserow_delete_user() {
 # АВТОМАТИЧЕСКАЯ НАСТРОЙКА
 # ============================================================================
 
+# ============================================================================
+# АВТОМАТИЧЕСКАЯ НАСТРОЙКА
+# ============================================================================
+
 auto_setup() {
     clear_screen
     
@@ -422,14 +426,33 @@ auto_setup() {
     
     echo ""
     
-    # Проверка имени сервера из конфига
-    if [[ -n "$SERVER_NAME" ]]; then
-        # Имя сервера есть в config.conf - используем его
-        save_server_name "$SERVER_NAME"
-        echo -e "${GREEN}✓${NC} Имя сервера из конфига: ${CYAN}$SERVER_NAME${NC}"
+    # ИСПРАВЛЕНИЕ: Проверяем server.conf и принудительно обновляем из config.conf
+    local config_server_name="$SERVER_NAME"  # Сохраняем значение из config.conf
+    
+    # Проверяем существующий server.conf
+    if load_server_name; then
+        # Файл существует, проверяем совпадает ли с config.conf
+        if [[ -n "$config_server_name" && "$SERVER_NAME" != "$config_server_name" ]]; then
+            # Значения не совпадают - приоритет config.conf
+            echo -e "${YELLOW}⚠${NC} Обнаружено расхождение в имени сервера:"
+            echo -e "  server.conf: ${YELLOW}$SERVER_NAME${NC}"
+            echo -e "  config.conf: ${CYAN}$config_server_name${NC}"
+            echo -e "${GREEN}✓${NC} Обновляем из config.conf..."
+            SERVER_NAME="$config_server_name"
+            save_server_name "$SERVER_NAME"
+            echo -e "${GREEN}✓${NC} Имя сервера обновлено: ${CYAN}$SERVER_NAME${NC}"
+        else
+            echo -e "${GREEN}✓${NC} Имя сервера: ${CYAN}$SERVER_NAME${NC}"
+        fi
     else
-        # Имя сервера не задано в config.conf - спрашиваем
-        if ! load_server_name || [[ -z "$SERVER_NAME" ]]; then
+        # Файл не существует
+        if [[ -n "$config_server_name" ]]; then
+            # Имя есть в config.conf - используем его
+            SERVER_NAME="$config_server_name"
+            save_server_name "$SERVER_NAME"
+            echo -e "${GREEN}✓${NC} Имя сервера из конфига: ${CYAN}$SERVER_NAME${NC}"
+        else
+            # Имени нет нигде - спрашиваем
             echo -e "${CYAN}╔════════════════════════════════════════════════════════════════╗${NC}"
             echo -e "${CYAN}║              НАСТРОЙКА ИМЕНИ СЕРВЕРА                          ║${NC}"
             echo -e "${CYAN}╚════════════════════════════════════════════════════════════════╝${NC}"
@@ -444,8 +467,6 @@ auto_setup() {
             save_server_name "$server_input"
             SERVER_NAME="$server_input"
             echo -e "${GREEN}✓${NC} Имя сервера сохранено: ${CYAN}$SERVER_NAME${NC}"
-        else
-            echo -e "${GREEN}✓${NC} Имя сервера: ${CYAN}$SERVER_NAME${NC}"
         fi
     fi
     
