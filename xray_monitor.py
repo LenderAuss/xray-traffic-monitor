@@ -267,6 +267,8 @@ class TrafficAggregator:
 # ============================================================================
 
 class BaserowSync:
+    """Синхронизация с Baserow (исправленная логика как в bash)"""
+    
     def __init__(self, token: str, table_id: str, server_name: str, min_sync_mb: float = 10.0, enabled: bool = True):
         self.token = token
         self.table_id = table_id
@@ -287,7 +289,14 @@ class BaserowSync:
             print(f"🔄 Baserow Sync: Enabled")
             print(f"   Server: {server_name}, Min: {min_sync_mb:.0f} MB")
     
+    def extract_username(self, email: str) -> str:
+        """Извлекает username (до первого _)"""
+        if '_' in email:
+            return email.split('_')[0]
+        return email
+    
     def should_sync(self, email: str, total: int) -> bool:
+        """Проверяет нужна ли синхронизация"""
         if not self.enabled or total < self.min_sync_mb:
             return False
         
@@ -295,47 +304,110 @@ class BaserowSync:
         delta = total - last_total
         return delta >= self.min_sync_mb
     
+    def get_user_gb_from_baserow(self, email: str) -> float:
+        """Получает текущий GB из Baserow"""
+        try:
+            username = self.extract_username(email)
+            url = f"{self.base_url}/{self.table_id}/"
+            params = {"user_field_names": "true"}
+            
+            response = requests.get(url, headers=self.headers, params=params, timeout=10)
+            
+            if response.status_code == 200:
+                results = response.json().get('results', [])
+                for row in results:
+                    # Ищем по user И server
+                    if row.get('user') == username and row.get('server') == self.server_name:
+                        gb_value = row.get('GB', 0)
+                        if isinstance(gb_value, str):
+                            gb_value = ''.join(c for c in gb_value if c.isdigit() or c == '.')
+                            try:
+                                gb_value = float(gb_value)
+                            except:
+                                gb_value = 0.0
+                        return float(gb_value or 0)
+        except Exception as e:
+            print(f"⚠️  Error getting GB: {e}")
+        return 0.0
+    
     def sync_user(self, email: str, uplink: int, downlink: int) -> bool:
+        """Синхронизирует пользователя"""
         total = uplink + downlink
         
         if not self.should_sync(email, total):
             return False
         
         try:
-            user_row = self._find_user(email)
-            if not user_row:
-                return False
+            username = self.extract_username(email)
             
-            row_id = user_row['id']
-            gb_total = total / (1024 ** 3)
+            # Получаем текущий GB из Baserow
+            current_gb = self.get_user_gb_from_baserow(email)
+            current_bytes = int(current_gb * 1024 ** 3)
             
-            update_data = {self.server_name: round(gb_total, 2)}
+            # Добавляем новый трафик
+            new_total_bytes = current_bytes + total
+            new_total_gb = round(new_total_bytes / (1024 ** 3), 6)
             
-            if self._update_row(row_id, update_data):
-                self._last_synced[email] = total
-                print(f"✅ Synced {email}: {gb_total:.2f} GB")
-                return True
+            # Ищем строку
+            user_row = self._find_user_row(username)
+            
+            if user_row:
+                # Обновляем
+                row_id = user_row['id']
+                update_data = {"GB": new_total_gb}
+                
+                if self._update_row(row_id, update_data):
+                    self._last_synced[email] = total
+                    print(f"✅ Synced {username}: +{total/(1024**3):.2f} GB → {new_total_gb:.2f} GB")
+                    return True
+            else:
+                # Создаем
+                create_data = {
+                    "user": username,
+                    "server": self.server_name,
+                    "GB": new_total_gb
+                }
+                
+                if self._create_row(create_data):
+                    self._last_synced[email] = total
+                    print(f"✅ Created {username}: {new_total_gb:.2f} GB")
+                    return True
+                    
         except Exception as e:
             print(f"❌ Sync error {email}: {e}")
         
         return False
     
-    def _find_user(self, email: str) -> Optional[Dict]:
+    def _find_user_row(self, username: str) -> Optional[Dict]:
+        """Ищет строку по user И server"""
         try:
             url = f"{self.base_url}/{self.table_id}/"
-            params = {"user_field_names": "true", "search": email}
+            params = {"user_field_names": "true"}
+            
             response = requests.get(url, headers=self.headers, params=params, timeout=10)
             
             if response.status_code == 200:
                 results = response.json().get('results', [])
                 for row in results:
-                    if row.get('user') == email:
+                    if row.get('user') == username and row.get('server') == self.server_name:
                         return row
         except Exception as e:
-            print(f"⚠️  Find error {email}: {e}")
+            print(f"⚠️  Find error: {e}")
         return None
     
+    def _create_row(self, data: Dict) -> bool:
+        """Создает строку"""
+        try:
+            url = f"{self.base_url}/{self.table_id}/"
+            params = {"user_field_names": "true"}
+            response = requests.post(url, headers=self.headers, params=params, json=data, timeout=10)
+            return response.status_code in (200, 201)
+        except Exception as e:
+            print(f"⚠️  Create error: {e}")
+            return False
+    
     def _update_row(self, row_id: int, data: Dict) -> bool:
+        """Обновляет строку"""
         try:
             url = f"{self.base_url}/{self.table_id}/{row_id}/"
             params = {"user_field_names": "true"}
@@ -346,6 +418,7 @@ class BaserowSync:
             return False
     
     def sync_all(self, users: Dict[str, TrafficData], sync_interval_minutes: int) -> int:
+        """Синхронизирует всех по расписанию"""
         if not self.enabled:
             return 0
         
@@ -358,14 +431,21 @@ class BaserowSync:
         self._last_sync_time = current_time
         synced_count = 0
         
+        print(f"\n{'='*60}")
+        print(f"📊 Автосинхронизация с Baserow")
+        print(f"{'='*60}")
+        
         for email, data in users.items():
             if self.sync_user(email, data.uplink, data.downlink):
                 synced_count += 1
         
         if synced_count > 0:
-            print(f"📊 Synced {synced_count} users to Baserow")
+            print(f"{'='*60}")
+            print(f"✅ Синхронизировано: {synced_count}")
+            print(f"{'='*60}\n")
         
         return synced_count
+
 
 # ============================================================================
 # CONSOLE RENDERER
