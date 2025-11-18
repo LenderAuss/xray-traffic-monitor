@@ -13,25 +13,35 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+WHITE='\033[1;37m'
 NC='\033[0m'
 
 # URLs
-SCRIPT_URL="https://raw.githubusercontent.com/LenderAuss/xray-traffic-monitor/main/xray_monitor.py"
-CONFIG_URL="https://raw.githubusercontent.com/LenderAuss/xray-traffic-monitor/main/monitor_config.conf"
+REPO_BASE="https://raw.githubusercontent.com/LenderAuss/xray-traffic-monitor/main/python-version"
+SCRIPT_URL="${REPO_BASE}/xray_monitor.py"
+CONFIG_URL="${REPO_BASE}/monitor_config.conf"
+REQUIREMENTS_URL="${REPO_BASE}/requirements.txt"
 
 # Пути установки
 INSTALL_DIR="/opt/xray-monitor"
 SCRIPT_PATH="${INSTALL_DIR}/xray_monitor.py"
 CONFIG_PATH="${INSTALL_DIR}/monitor_config.conf"
+REQUIREMENTS_PATH="${INSTALL_DIR}/requirements.txt"
 SYMLINK_PATH="/usr/local/bin/xray-monitor"
 SERVICE_FILE="/etc/systemd/system/xray-monitor.service"
 VENV_PATH="${INSTALL_DIR}/venv"
+
+# Xray конфиг
+XRAY_CONFIG="/usr/local/etc/xray/config.json"
+XRAY_API_PORT=10085
 
 # ============================================================================
 # ФУНКЦИИ
 # ============================================================================
 
 print_header() {
+    clear
     echo -e "${BLUE}════════════════════════════════════════════════════════════${NC}"
     echo -e "${BLUE}    Установка Xray Traffic Monitor Python v4.0${NC}"
     echo -e "${BLUE}    High-Performance Edition with gRPC${NC}"
@@ -73,12 +83,12 @@ install_python() {
     if [[ -f /etc/debian_version ]]; then
         # Debian/Ubuntu
         apt-get update
-        apt-get install -y python3 python3-pip python3-venv
+        apt-get install -y python3 python3-pip python3-venv python3-dev build-essential
     elif [[ -f /etc/redhat-release ]]; then
         # CentOS/RHEL
-        yum install -y python3 python3-pip
+        yum install -y python3 python3-pip python3-devel gcc
     else
-        echo -e "${RED}✗ Неизвестная ОС. Установите Python 3.10+ вручную${NC}"
+        echo -e "${RED}✗ Неизвестная ОС. Установите Python 3.8+ вручную${NC}"
         exit 1
     fi
     
@@ -87,6 +97,15 @@ install_python() {
 
 create_directory() {
     echo -e "${CYAN}📁 Создание директории...${NC}"
+    
+    # Если директория существует, делаем backup конфига
+    if [[ -d "$INSTALL_DIR" ]]; then
+        if [[ -f "$CONFIG_PATH" ]]; then
+            echo -e "${YELLOW}⚠ Найден существующий конфиг, создаю резервную копию...${NC}"
+            cp "$CONFIG_PATH" "${CONFIG_PATH}.backup.$(date +%Y%m%d_%H%M%S)"
+        fi
+    fi
+    
     mkdir -p "$INSTALL_DIR"
     echo -e "${GREEN}✓ Директория создана: $INSTALL_DIR${NC}"
 }
@@ -103,16 +122,31 @@ download_files() {
         exit 1
     fi
     
-    # Скачиваем конфиг
-    echo -e "  → Скачивание конфигурации..."
-    if wget -q -O "$CONFIG_PATH" "$CONFIG_URL" 2>/dev/null; then
-        echo -e "${GREEN}  ✓ Конфиг загружен${NC}"
+    # Скачиваем конфиг (не перезаписываем если существует)
+    if [[ -f "$CONFIG_PATH" ]]; then
+        echo -e "${YELLOW}  ⚠ Конфиг уже существует, пропускаю загрузку${NC}"
+        echo -e "${CYAN}    Используется существующий: $CONFIG_PATH${NC}"
     else
-        echo -e "${YELLOW}  ⚠ Конфиг не найден, создаем локально${NC}"
-        create_default_config
+        echo -e "  → Скачивание конфигурации..."
+        if wget -q -O "$CONFIG_PATH" "$CONFIG_URL" 2>/dev/null; then
+            echo -e "${GREEN}  ✓ Конфиг загружен${NC}"
+        else
+            echo -e "${YELLOW}  ⚠ Конфиг не найден, создаю локально${NC}"
+            create_default_config
+        fi
+    fi
+    
+    # Скачиваем requirements.txt
+    echo -e "  → Скачивание requirements.txt..."
+    if wget -q -O "$REQUIREMENTS_PATH" "$REQUIREMENTS_URL" 2>/dev/null; then
+        echo -e "${GREEN}  ✓ requirements.txt загружен${NC}"
+    else
+        echo -e "${YELLOW}  ⚠ requirements.txt не найден, создаю локально${NC}"
+        create_default_requirements
     fi
     
     chmod +x "$SCRIPT_PATH"
+    chmod 600 "$CONFIG_PATH"
 }
 
 create_default_config() {
@@ -155,8 +189,21 @@ EOF
     chmod 600 "$CONFIG_PATH"
 }
 
+create_default_requirements() {
+    cat > "$REQUIREMENTS_PATH" << 'EOF'
+# Xray Traffic Monitor Python - Dependencies
+grpcio>=1.50.0,<2.0.0
+protobuf>=3.20.0,<5.0.0
+EOF
+}
+
 setup_venv() {
     echo -e "${CYAN}🐍 Настройка виртуального окружения Python...${NC}"
+    
+    # Удаляем старое venv если есть
+    if [[ -d "$VENV_PATH" ]]; then
+        rm -rf "$VENV_PATH"
+    fi
     
     # Создаем venv
     python3 -m venv "$VENV_PATH"
@@ -164,14 +211,21 @@ setup_venv() {
     # Активируем и устанавливаем зависимости
     source "${VENV_PATH}/bin/activate"
     
-    echo -e "  → Установка grpcio..."
+    echo -e "  → Установка зависимостей..."
     pip3 install --upgrade pip > /dev/null 2>&1
-    pip3 install grpcio > /dev/null 2>&1
+    
+    # Устанавливаем из requirements.txt
+    if [[ -f "$REQUIREMENTS_PATH" ]]; then
+        pip3 install -r "$REQUIREMENTS_PATH" > /dev/null 2>&1
+    else
+        pip3 install "grpcio>=1.50.0" "protobuf>=3.20.0,<5.0.0" > /dev/null 2>&1
+    fi
     
     if [[ $? -eq 0 ]]; then
         echo -e "${GREEN}✓ Зависимости установлены${NC}"
     else
         echo -e "${RED}✗ Ошибка установки зависимостей${NC}"
+        deactivate
         exit 1
     fi
     
@@ -181,7 +235,7 @@ setup_venv() {
 create_symlink() {
     echo -e "${CYAN}🔗 Создание символической ссылки...${NC}"
     
-    # Создаем wrapper script
+    # Создаем wrapper script для удобного запуска
     cat > "$SYMLINK_PATH" << EOF
 #!/bin/bash
 source ${VENV_PATH}/bin/activate
@@ -192,8 +246,27 @@ EOF
     echo -e "${GREEN}✓ Команда 'xray-monitor' создана${NC}"
 }
 
+load_config() {
+    if [[ -f "$CONFIG_PATH" ]]; then
+        source "$CONFIG_PATH"
+    fi
+}
+
 create_systemd_service() {
     echo -e "${CYAN}⚙️  Создание systemd service...${NC}"
+    
+    # Загружаем конфиг для получения параметров
+    load_config
+    
+    # Определяем параметры запуска из конфига
+    local mode="console"
+    local interval="${REFRESH_INTERVAL:-2}"
+    local prometheus_args=""
+    
+    if [[ "${PROMETHEUS_ENABLED}" == "true" ]]; then
+        mode="both"
+        prometheus_args="--port ${PROMETHEUS_PORT:-9090}"
+    fi
     
     cat > "$SERVICE_FILE" << EOF
 [Unit]
@@ -207,7 +280,7 @@ Type=simple
 User=root
 WorkingDirectory=${INSTALL_DIR}
 Environment="PATH=${VENV_PATH}/bin:/usr/local/bin:/usr/bin:/bin"
-ExecStart=${VENV_PATH}/bin/python3 ${SCRIPT_PATH} --mode console --interval 2
+ExecStart=${VENV_PATH}/bin/python3 ${SCRIPT_PATH} --mode ${mode} --interval ${interval} ${prometheus_args}
 Restart=always
 RestartSec=10
 StandardOutput=journal
@@ -230,8 +303,6 @@ EOF
 
 configure_xray_api() {
     echo -e "${CYAN}🔧 Проверка Xray Stats API...${NC}"
-    
-    XRAY_CONFIG="/usr/local/etc/xray/config.json"
     
     if [[ ! -f "$XRAY_CONFIG" ]]; then
         echo -e "${YELLOW}⚠ Xray конфиг не найден: $XRAY_CONFIG${NC}"
@@ -260,42 +331,34 @@ configure_xray_api() {
 setup_xray_stats_api() {
     echo -e "${CYAN}⚙️  Настройка Xray Stats API...${NC}"
     
-    XRAY_CONFIG="/usr/local/etc/xray/config.json"
-    API_PORT=10085
-    
     # Backup
     cp "$XRAY_CONFIG" "${XRAY_CONFIG}.backup.$(date +%Y%m%d_%H%M%S)"
+    echo -e "${GREEN}✓ Создан backup конфига${NC}"
     
     # Добавляем stats
     if ! jq -e '.stats' "$XRAY_CONFIG" > /dev/null 2>&1; then
-        jq '. + {"stats": {}}' "$XRAY_CONFIG" > /tmp/xray_config.tmp
-        mv /tmp/xray_config.tmp "$XRAY_CONFIG"
+        jq '. + {"stats": {}}' "$XRAY_CONFIG" > /tmp/xray_config.tmp && mv /tmp/xray_config.tmp "$XRAY_CONFIG"
     fi
     
     # Добавляем api
     if ! jq -e '.api' "$XRAY_CONFIG" > /dev/null 2>&1; then
-        jq '. + {"api": {"tag": "api", "services": ["StatsService"]}}' "$XRAY_CONFIG" > /tmp/xray_config.tmp
-        mv /tmp/xray_config.tmp "$XRAY_CONFIG"
+        jq '. + {"api": {"tag": "api", "services": ["StatsService"]}}' "$XRAY_CONFIG" > /tmp/xray_config.tmp && mv /tmp/xray_config.tmp "$XRAY_CONFIG"
     fi
     
     # Настраиваем policy
-    jq '.policy.levels."0" += {"statsUserUplink": true, "statsUserDownlink": true}' "$XRAY_CONFIG" > /tmp/xray_config.tmp
-    mv /tmp/xray_config.tmp "$XRAY_CONFIG"
-    
-    jq '.policy.system = {"statsInboundUplink": true, "statsInboundDownlink": true}' "$XRAY_CONFIG" > /tmp/xray_config.tmp
-    mv /tmp/xray_config.tmp "$XRAY_CONFIG"
+    jq '.policy.levels."0" += {"statsUserUplink": true, "statsUserDownlink": true}' "$XRAY_CONFIG" > /tmp/xray_config.tmp && mv /tmp/xray_config.tmp "$XRAY_CONFIG"
+    jq '.policy.system = {"statsInboundUplink": true, "statsInboundDownlink": true}' "$XRAY_CONFIG" > /tmp/xray_config.tmp && mv /tmp/xray_config.tmp "$XRAY_CONFIG"
     
     # Добавляем API inbound
     api_exists=$(jq '.inbounds[] | select(.tag == "api")' "$XRAY_CONFIG")
     if [[ -z "$api_exists" ]]; then
         jq --argjson api_inbound '{
             "listen": "127.0.0.1",
-            "port": '"$API_PORT"',
+            "port": '"$XRAY_API_PORT"',
             "protocol": "dokodemo-door",
             "settings": {"address": "127.0.0.1"},
             "tag": "api"
-        }' '.inbounds += [$api_inbound]' "$XRAY_CONFIG" > /tmp/xray_config.tmp
-        mv /tmp/xray_config.tmp "$XRAY_CONFIG"
+        }' '.inbounds += [$api_inbound]' "$XRAY_CONFIG" > /tmp/xray_config.tmp && mv /tmp/xray_config.tmp "$XRAY_CONFIG"
     fi
     
     # Добавляем routing для API
@@ -305,8 +368,7 @@ setup_xray_stats_api() {
             "type": "field",
             "inboundTag": ["api"],
             "outboundTag": "api"
-        }' '.routing.rules += [$api_rule]' "$XRAY_CONFIG" > /tmp/xray_config.tmp
-        mv /tmp/xray_config.tmp "$XRAY_CONFIG"
+        }' '.routing.rules += [$api_rule]' "$XRAY_CONFIG" > /tmp/xray_config.tmp && mv /tmp/xray_config.tmp "$XRAY_CONFIG"
     fi
     
     # Добавляем API outbound
@@ -315,8 +377,7 @@ setup_xray_stats_api() {
         jq --argjson api_outbound '{
             "protocol": "freedom",
             "tag": "api"
-        }' '.outbounds += [$api_outbound]' "$XRAY_CONFIG" > /tmp/xray_config.tmp
-        mv /tmp/xray_config.tmp "$XRAY_CONFIG"
+        }' '.outbounds += [$api_outbound]' "$XRAY_CONFIG" > /tmp/xray_config.tmp && mv /tmp/xray_config.tmp "$XRAY_CONFIG"
     fi
     
     # Перезапускаем Xray
@@ -328,6 +389,7 @@ setup_xray_stats_api() {
         echo -e "${GREEN}✓ Stats API настроен и активен${NC}"
     else
         echo -e "${RED}✗ Ошибка настройки Stats API${NC}"
+        echo -e "${YELLOW}Проверьте: journalctl -u xray -n 50${NC}"
         return 1
     fi
 }
@@ -344,37 +406,25 @@ print_usage() {
     echo -e "   • Venv:    ${YELLOW}${VENV_PATH}${NC}"
     echo -e "   • Service: ${YELLOW}${SERVICE_FILE}${NC}"
     echo ""
-    echo -e "${CYAN}📋 Доступные команды:${NC}"
+    echo -e "${CYAN}📋 Управление сервисом:${NC}"
+    echo -e "    ${WHITE}systemctl start xray-monitor${NC}      # Запустить"
+    echo -e "    ${WHITE}systemctl stop xray-monitor${NC}       # Остановить"
+    echo -e "    ${WHITE}systemctl restart xray-monitor${NC}    # Перезапустить"
+    echo -e "    ${WHITE}systemctl status xray-monitor${NC}     # Статус"
+    echo -e "    ${WHITE}systemctl enable xray-monitor${NC}     # Автозапуск"
     echo ""
-    echo -e "${YELLOW}  Управление сервисом:${NC}"
-    echo -e "    systemctl start xray-monitor      # Запустить мониторинг"
-    echo -e "    systemctl stop xray-monitor       # Остановить мониторинг"
-    echo -e "    systemctl restart xray-monitor    # Перезапустить мониторинг"
-    echo -e "    systemctl status xray-monitor     # Статус мониторинга"
-    echo -e "    systemctl enable xray-monitor     # Автозапуск при загрузке"
+    echo -e "${CYAN}📊 Просмотр логов:${NC}"
+    echo -e "    ${WHITE}journalctl -u xray-monitor -f${NC}     # В реальном времени"
+    echo -e "    ${WHITE}journalctl -u xray-monitor -n 100${NC} # Последние 100 строк"
     echo ""
-    echo -e "${YELLOW}  Просмотр логов:${NC}"
-    echo -e "    journalctl -u xray-monitor -f     # Просмотр в реальном времени"
-    echo -e "    journalctl -u xray-monitor -n 100 # Последние 100 строк"
+    echo -e "${CYAN}🔧 Ручной запуск:${NC}"
+    echo -e "    ${WHITE}xray-monitor --mode console --interval 2${NC}"
+    echo -e "    ${WHITE}xray-monitor --mode prometheus --port 9090${NC}"
+    echo -e "    ${WHITE}xray-monitor --mode both --interval 5${NC}"
     echo ""
-    echo -e "${YELLOW}  Ручной запуск:${NC}"
-    echo -e "    xray-monitor --mode console --interval 2"
-    echo -e "    xray-monitor --mode prometheus --port 9090"
-    echo -e "    xray-monitor --mode both --interval 5 --port 9090"
-    echo ""
-    echo -e "${YELLOW}  Конфигурация:${NC}"
-    echo -e "    nano ${CONFIG_PATH}    # Редактировать конфиг"
-    echo -e "    После изменений: systemctl restart xray-monitor"
-    echo ""
-    echo -e "${CYAN}🔧 Настройка конфига:${NC}"
-    echo -e "   1. Откройте: ${YELLOW}nano ${CONFIG_PATH}${NC}"
-    echo -e "   2. Измените необходимые параметры:"
-    echo -e "      • SERVER_NAME        - имя вашего сервера"
-    echo -e "      • BASEROW_TOKEN      - токен Baserow API"
-    echo -e "      • BASEROW_TABLE_ID   - ID таблицы Baserow"
-    echo -e "      • REFRESH_INTERVAL   - интервал обновления"
-    echo -e "   3. Сохраните (Ctrl+O, Enter, Ctrl+X)"
-    echo -e "   4. Перезапустите: ${YELLOW}systemctl restart xray-monitor${NC}"
+    echo -e "${CYAN}⚙️  Редактирование конфига:${NC}"
+    echo -e "    ${WHITE}nano ${CONFIG_PATH}${NC}"
+    echo -e "    ${YELLOW}После изменений:${NC} ${WHITE}systemctl restart xray-monitor${NC}"
     echo ""
 }
 
@@ -414,6 +464,7 @@ main() {
     # Включаем автозапуск
     echo -e "${CYAN}✅ Включение автозапуска...${NC}"
     systemctl enable xray-monitor.service
+    echo -e "${GREEN}✓ Автозапуск включен${NC}"
     
     # Вывод инструкций
     print_usage
@@ -423,16 +474,26 @@ main() {
     read -r response
     
     if [[ "$response" =~ ^[Yy]$ ]]; then
-        echo -e "${CYAN}Запуск...${NC}"
+        echo ""
+        echo -e "${CYAN}Запуск мониторинга...${NC}"
         systemctl start xray-monitor
         sleep 2
         echo ""
-        systemctl status xray-monitor --no-pager
+        systemctl status xray-monitor --no-pager -l
         echo ""
-        echo -e "${GREEN}✓ Мониторинг запущен!${NC}"
-        echo -e "${CYAN}💡 Просмотр в реальном времени: ${YELLOW}journalctl -u xray-monitor -f${NC}"
+        echo -e "${GREEN}✅ Мониторинг запущен!${NC}"
+        echo -e "${CYAN}💡 Просмотр в реальном времени:${NC}"
+        echo -e "   ${WHITE}journalctl -u xray-monitor -f${NC}"
+    else
+        echo ""
+        echo -e "${YELLOW}Для запуска выполните:${NC}"
+        echo -e "   ${WHITE}systemctl start xray-monitor${NC}"
     fi
     
+    echo ""
+    echo -e "${MAGENTA}════════════════════════════════════════════════════════════${NC}"
+    echo -e "${MAGENTA}Спасибо за установку Xray Traffic Monitor Python v4.0!${NC}"
+    echo -e "${MAGENTA}════════════════════════════════════════════════════════════${NC}"
     echo ""
 }
 
