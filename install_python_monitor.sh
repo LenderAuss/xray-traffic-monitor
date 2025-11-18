@@ -64,9 +64,12 @@ check_python() {
         
         if [[ $PYTHON_MAJOR -ge 3 ]] && [[ $PYTHON_MINOR -ge 8 ]]; then
             echo -e "${GREEN}✓ Python $PYTHON_VERSION${NC}"
-            # Проверяем наличие venv
-            if ! python3 -m venv --help &> /dev/null; then
+            # Надежная проверка через создание тестового venv
+            if ! python3 -m venv /tmp/test_venv_$$ &> /dev/null; then
+                echo -e "${YELLOW}⚠ python3-venv не установлен${NC}"
                 install_python_venv
+            else
+                rm -rf /tmp/test_venv_$$
             fi
             return 0
         else
@@ -124,6 +127,7 @@ download_files() {
     # xray_monitor.py
     echo -ne "  → xray_monitor.py ... "
     if wget -q --timeout=30 -O "$SCRIPT_PATH" "${GITHUB_REPO}/xray_monitor.py" 2>/dev/null; then
+        chmod +x "$SCRIPT_PATH"
         echo -e "${GREEN}✓${NC}"
     else
         echo -e "${RED}✗${NC}"
@@ -157,7 +161,6 @@ download_files() {
         create_default_requirements
     fi
     
-    chmod +x "$SCRIPT_PATH"
     chmod 600 "$CONFIG_PATH"
 }
 
@@ -205,6 +208,7 @@ create_default_requirements() {
     cat > "$REQUIREMENTS_PATH" << 'EOF'
 grpcio>=1.50.0,<2.0.0
 protobuf>=3.20.0,<5.0.0
+requests>=2.28.0
 EOF
 }
 
