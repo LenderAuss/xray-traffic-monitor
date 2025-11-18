@@ -461,7 +461,7 @@ auto_setup() {
             read -p "> " server_input
             
             if [[ -z "$server_input" ]]; then
-                server_input="Server-$(hostname)"
+                server_input="$(hostname)"
             fi
             
             save_server_name "$server_input"
