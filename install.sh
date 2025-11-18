@@ -1,18 +1,20 @@
 #!/bin/bash
 
 # ============================================================================
-# Установщик Xray Traffic Monitor v3.3 (Auto Mode)
+# Установщик Xray Traffic Monitor v3.4
 # ============================================================================
 
 set -e
 
 SCRIPT_URL="https://raw.githubusercontent.com/LenderAuss/xray-traffic-monitor/main/xray-traffic-monitor.sh"
+CONFIG_URL="https://raw.githubusercontent.com/LenderAuss/xray-traffic-monitor/main/config.conf"
 INSTALL_PATH="/root/xray-traffic-monitor.sh"
+CONFIG_PATH="/root/config.conf"
 SYMLINK_PATH="/usr/local/bin/xray-traffic-monitor"
 SERVICE_FILE="/etc/systemd/system/xray-monitor.service"
 
 echo "════════════════════════════════════════════════════════════"
-echo "    Установка Xray Traffic Monitor v3.3 (Auto Mode)"
+echo "    Установка Xray Traffic Monitor v3.4"
 echo "════════════════════════════════════════════════════════════"
 echo ""
 
@@ -27,7 +29,16 @@ echo "📥 Скачивание скрипта..."
 wget -q -O "$INSTALL_PATH" "$SCRIPT_URL"
 
 if [[ $? -ne 0 ]]; then
-    echo "❌ Ошибка скачивания!"
+    echo "❌ Ошибка скачивания скрипта!"
+    exit 1
+fi
+
+# Скачиваем конфиг
+echo "📥 Скачивание конфигурационного файла..."
+wget -q -O "$CONFIG_PATH" "$CONFIG_URL"
+
+if [[ $? -ne 0 ]]; then
+    echo "❌ Ошибка скачивания конфига!"
     exit 1
 fi
 
@@ -80,6 +91,9 @@ echo "════════════════════════�
 echo "✅ Установка завершена!"
 echo "════════════════════════════════════════════════════════════"
 echo ""
+echo "📝 Конфигурационный файл: ${CONFIG_PATH}"
+echo "   Отредактируйте его для изменения настроек Baserow"
+echo ""
 echo "📋 Доступные команды:"
 echo ""
 echo "  systemctl start xray-monitor      # Запустить мониторинг"
@@ -87,6 +101,8 @@ echo "  systemctl stop xray-monitor       # Остановить монитор�
 echo "  systemctl restart xray-monitor    # Перезапустить мониторинг"
 echo "  systemctl status xray-monitor     # Статус мониторинга"
 echo "  journalctl -u xray-monitor -f     # Просмотр логов в реальном времени"
+echo ""
+echo "  nano /root/config.conf             # Редактировать конфиг"
 echo ""
 echo "🚀 Запуск мониторинга..."
 systemctl start xray-monitor
@@ -98,4 +114,5 @@ echo "📊 Текущий статус:"
 systemctl status xray-monitor --no-pager
 echo ""
 echo "💡 Для просмотра мониторинга: journalctl -u xray-monitor -f"
+echo "💡 Для редактирования конфига: nano /root/config.conf"
 echo ""
