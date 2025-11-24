@@ -175,8 +175,8 @@ XRAY_API_SERVER=127.0.0.1:10085    # Адрес Xray Stats API
 XRAY_CONFIG_PATH=/usr/local/etc/xray/config.json
 
 # ===== BASEROW SETTINGS =====
-BASEROW_TOKEN=zoJjilyrKAVe42EAV57kBOEQGc8izU1t
-BASEROW_TABLE_ID=742631
+BASEROW_TOKEN=****
+BASEROW_TABLE_ID=*****
 BASEROW_ENABLED=true                # true/false - включить/выключить синхронизацию
 
 # ===== SERVER SETTINGS =====
