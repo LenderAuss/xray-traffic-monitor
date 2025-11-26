@@ -2,7 +2,7 @@
 """
 Xray Traffic Monitor - High-Performance Python Implementation with Baserow
 ===========================================================================
-Version: 4.1 with Baserow Integration
+Version: 4.2 - Fixed traffic accumulation logic
 """
 
 import asyncio
@@ -10,6 +10,7 @@ import time
 import argparse
 import sys
 import os
+import json
 import requests
 from typing import Dict, Tuple, Optional
 from dataclasses import dataclass, field
@@ -79,44 +80,15 @@ class StatsServiceStub:
         result = 0
         shift = 0
         bytes_read = 0
-        
-        while pos + bytes_read < len(data):
-            byte = data[pos + bytes_read]
+        while pos < len(data):
+            byte = data[pos]
+            pos += 1
             bytes_read += 1
             result |= (byte & 0x7f) << shift
-            if not (byte & 0x80):
+            if (byte & 0x80) == 0:
                 break
             shift += 7
-        
         return result, bytes_read
-    
-    @staticmethod
-    def _parse_stat(data: bytes) -> Optional[dict]:
-        stat = {}
-        pos = 0
-        
-        while pos < len(data):
-            if pos >= len(data):
-                break
-            tag = data[pos]
-            pos += 1
-            
-            field_number = tag >> 3
-            wire_type = tag & 0x07
-            
-            if field_number == 1 and wire_type == 2:
-                length, bytes_read = StatsServiceStub._read_varint(data, pos)
-                pos += bytes_read
-                stat['name'] = data[pos:pos + length].decode('utf-8', errors='ignore')
-                pos += length
-            elif field_number == 2 and wire_type == 0:
-                value, bytes_read = StatsServiceStub._read_varint(data, pos)
-                pos += bytes_read
-                stat['value'] = value
-            else:
-                pos = StatsServiceStub._skip_field(data, pos, wire_type)
-        
-        return stat if 'name' in stat else None
     
     @staticmethod
     def _skip_field(data: bytes, pos: int, wire_type: int) -> int:
@@ -127,153 +99,157 @@ class StatsServiceStub:
         elif wire_type == 2:
             length, bytes_read = StatsServiceStub._read_varint(data, pos)
             return pos + bytes_read + length
-        else:
-            return pos
+        elif wire_type == 5:
+            return pos + 4
+        elif wire_type == 1:
+            return pos + 8
+        return pos
+    
+    @staticmethod
+    def _parse_stat(data: bytes) -> Optional[dict]:
+        pos = 0
+        name = None
+        value = 0
+        
+        while pos < len(data):
+            if pos >= len(data):
+                break
+            tag = data[pos]
+            pos += 1
+            field_number = tag >> 3
+            wire_type = tag & 0x07
+            
+            if field_number == 1 and wire_type == 2:
+                length, bytes_read = StatsServiceStub._read_varint(data, pos)
+                pos += bytes_read
+                name = data[pos:pos + length].decode('utf-8')
+                pos += length
+            elif field_number == 2 and wire_type == 0:
+                value, bytes_read = StatsServiceStub._read_varint(data, pos)
+                pos += bytes_read
+            else:
+                pos = StatsServiceStub._skip_field(data, pos, wire_type)
+        
+        if name:
+            return {'name': name, 'value': value}
+        return None
+
 
 # ============================================================================
-# DATA STRUCTURES
+# XRAY STATS CLIENT
+# ============================================================================
+
+class XrayStatsClient:
+    def __init__(self, server: str = "127.0.0.1:10085"):
+        self.server = server
+        self.channel = None
+        self.stub = None
+    
+    async def connect(self) -> bool:
+        try:
+            self.channel = grpc_aio.insecure_channel(self.server)
+            self.stub = StatsServiceStub(self.channel)
+            return True
+        except Exception as e:
+            print(f"❌ Connection error: {e}")
+            return False
+    
+    async def disconnect(self):
+        if self.channel:
+            await self.channel.close()
+    
+    async def query_all_stats(self) -> Dict[str, Tuple[int, int]]:
+        if not self.stub:
+            return {}
+        
+        try:
+            response = await self.stub.QueryStats({'pattern': 'user>>>'})
+            stats = response.get('stat', [])
+            
+            users = {}
+            for stat in stats:
+                name = stat.get('name', '')
+                value = stat.get('value', 0)
+                
+                if '>>>traffic>>>' in name:
+                    parts = name.split('>>>')
+                    if len(parts) >= 4:
+                        email = parts[1]
+                        direction = parts[3]
+                        
+                        if email not in users:
+                            users[email] = [0, 0]
+                        
+                        if direction == 'uplink':
+                            users[email][0] = value
+                        elif direction == 'downlink':
+                            users[email][1] = value
+            
+            return {k: tuple(v) for k, v in users.items()}
+        except Exception as e:
+            print(f"⚠️  Query error: {e}")
+            return {}
+
+
+# ============================================================================
+# TRAFFIC DATA
 # ============================================================================
 
 @dataclass
 class TrafficData:
     uplink: int = 0
     downlink: int = 0
-    uplink_speed: float = 0.0
-    downlink_speed: float = 0.0
-    last_update: float = field(default_factory=time.time)
-    
-    @property
-    def total(self) -> int:
-        return self.uplink + self.downlink
+    up_speed: float = 0.0
+    down_speed: float = 0.0
+    last_uplink: int = 0
+    last_downlink: int = 0
 
-# ============================================================================
-# XRAY CLIENT
-# ============================================================================
-
-class XrayStatsClient:
-    def __init__(self, server: str = "127.0.0.1:10085"):
-        self.server = server
-        self.channel: Optional[grpc_aio.Channel] = None
-        self.stub: Optional[StatsServiceStub] = None
-        self._connected = False
-    
-    async def connect(self) -> bool:
-        try:
-            self.channel = grpc_aio.insecure_channel(self.server)
-            self.stub = StatsServiceStub(self.channel)
-            await self.channel.channel_ready()
-            self._connected = True
-            return True
-        except Exception as e:
-            print(f"❌ Connection error: {e}", file=sys.stderr)
-            self._connected = False
-            return False
-    
-    async def disconnect(self):
-        if self.channel:
-            await self.channel.close()
-            self._connected = False
-    
-    async def query_all_stats(self) -> Dict[str, Dict[str, int]]:
-        if not self._connected:
-            if not await self.connect():
-                return {}
-        
-        try:
-            request = {'pattern': 'user>>>'}
-            response = await self.stub.QueryStats(request, timeout=5.0)
-            return self._parse_stats_response(response)
-        except grpc.RpcError as e:
-            print(f"⚠️  gRPC error: {e.code()}", file=sys.stderr)
-            self._connected = False
-            return {}
-        except Exception as e:
-            print(f"⚠️  Query error: {e}", file=sys.stderr)
-            return {}
-    
-    def _parse_stats_response(self, response: dict) -> Dict[str, Dict[str, int]]:
-        result = defaultdict(lambda: {'uplink': 0, 'downlink': 0})
-        
-        for stat in response.get('stat', []):
-            name = stat.get('name', '')
-            value = stat.get('value', 0)
-            parts = name.split('>>>')
-            if len(parts) == 4 and parts[0] == 'user' and parts[2] == 'traffic':
-                email = parts[1]
-                direction = parts[3]
-                if direction in ('uplink', 'downlink'):
-                    result[email][direction] = int(value)
-        
-        return dict(result)
-
-# ============================================================================
-# TRAFFIC AGGREGATOR
-# ============================================================================
 
 class TrafficAggregator:
     def __init__(self):
         self.users: Dict[str, TrafficData] = {}
-        self._previous: Dict[str, Dict[str, int]] = {}
+        self.total_up: int = 0
+        self.total_down: int = 0
     
-    def update(self, stats: Dict[str, Dict[str, int]], interval: float) -> Dict[str, TrafficData]:
-        current_time = time.time()
-        
-        for email, counters in stats.items():
-            uplink = counters['uplink']
-            downlink = counters['downlink']
-            
+    def update(self, stats: Dict[str, Tuple[int, int]], interval: float) -> Dict[str, TrafficData]:
+        for email, (uplink, downlink) in stats.items():
             if email not in self.users:
-                self.users[email] = TrafficData(
-                    uplink=uplink,
-                    downlink=downlink,
-                    last_update=current_time
-                )
-                self._previous[email] = {'uplink': uplink, 'downlink': downlink}
-                continue
+                self.users[email] = TrafficData()
             
-            prev = self._previous[email]
-            delta_uplink = uplink - prev['uplink'] if uplink >= prev['uplink'] else uplink
-            delta_downlink = downlink - prev['downlink'] if downlink >= prev['downlink'] else downlink
+            data = self.users[email]
             
-            uplink_speed = delta_uplink / interval if interval > 0 else 0
-            downlink_speed = delta_downlink / interval if interval > 0 else 0
+            # Calculate speeds
+            up_diff = uplink - data.last_uplink if uplink >= data.last_uplink else uplink
+            down_diff = downlink - data.last_downlink if downlink >= data.last_downlink else downlink
             
-            self.users[email].uplink = uplink
-            self.users[email].downlink = downlink
-            self.users[email].uplink_speed = uplink_speed
-            self.users[email].downlink_speed = downlink_speed
-            self.users[email].last_update = current_time
+            data.up_speed = up_diff / interval if interval > 0 else 0
+            data.down_speed = down_diff / interval if interval > 0 else 0
             
-            self._previous[email] = {'uplink': uplink, 'downlink': downlink}
+            data.uplink = uplink
+            data.downlink = downlink
+            data.last_uplink = uplink
+            data.last_downlink = downlink
         
-        current_emails = set(stats.keys())
-        removed_emails = set(self.users.keys()) - current_emails
-        for email in removed_emails:
-            del self.users[email]
-            if email in self._previous:
-                del self._previous[email]
+        self.total_up = sum(d.uplink for d in self.users.values())
+        self.total_down = sum(d.downlink for d in self.users.values())
         
         return self.users
-    
-    def get_totals(self) -> Tuple[int, int, float, float]:
-        total_uplink = sum(u.uplink for u in self.users.values())
-        total_downlink = sum(u.downlink for u in self.users.values())
-        total_up_speed = sum(u.uplink_speed for u in self.users.values())
-        total_down_speed = sum(u.downlink_speed for u in self.users.values())
-        return total_uplink, total_downlink, total_up_speed, total_down_speed
+
 
 # ============================================================================
-# BASEROW SYNC
+# BASEROW SYNC - FIXED LOGIC
 # ============================================================================
 
 class BaserowSync:
-    """Синхронизация с Baserow (исправленная логика как в bash)"""
+    """Синхронизация с Baserow - ИСПРАВЛЕННАЯ ЛОГИКА"""
+    
+    STATE_FILE = "/opt/xray-monitor/sync_state.json"
     
     def __init__(self, token: str, table_id: str, server_name: str, min_sync_mb: float = 10.0, enabled: bool = True):
         self.token = token
         self.table_id = table_id
         self.server_name = server_name
-        self.min_sync_mb = min_sync_mb * 1024 * 1024
+        self.min_sync_bytes = int(min_sync_mb * 1024 * 1024)
         self.enabled = enabled
         
         self.base_url = "https://api.baserow.io/api/database/rows/table"
@@ -282,12 +258,40 @@ class BaserowSync:
             "Content-Type": "application/json"
         }
         
+        # Загружаем состояние из файла (переживает перезапуск мониторинга)
         self._last_synced: Dict[str, int] = {}
+        self._baseline: Dict[str, int] = {}  # Начальные значения при старте
+        self._baseline_initialized = False
         self._last_sync_time = time.time()
+        
+        self._load_state()
         
         if enabled:
             print(f"🔄 Baserow Sync: Enabled")
             print(f"   Server: {server_name}, Min: {min_sync_mb:.0f} MB")
+    
+    def _load_state(self):
+        """Загружает состояние из файла"""
+        try:
+            if os.path.exists(self.STATE_FILE):
+                with open(self.STATE_FILE, 'r') as f:
+                    state = json.load(f)
+                    self._last_synced = state.get('last_synced', {})
+                    print(f"📂 Loaded sync state for {len(self._last_synced)} users")
+        except Exception as e:
+            print(f"⚠️  Could not load state: {e}")
+    
+    def _save_state(self):
+        """Сохраняет состояние в файл"""
+        try:
+            state = {
+                'last_synced': self._last_synced,
+                'timestamp': datetime.now().isoformat()
+            }
+            with open(self.STATE_FILE, 'w') as f:
+                json.dump(state, f)
+        except Exception as e:
+            print(f"⚠️  Could not save state: {e}")
     
     def extract_username(self, email: str) -> str:
         """Извлекает username (до первого _)"""
@@ -295,14 +299,42 @@ class BaserowSync:
             return email.split('_')[0]
         return email
     
+    def _initialize_baseline(self, users: Dict[str, TrafficData]):
+        """Инициализирует baseline при первом запуске"""
+        if self._baseline_initialized:
+            return
+        
+        for email, data in users.items():
+            total = data.uplink + data.downlink
+            # Если у нас нет сохранённого состояния для этого пользователя,
+            # используем текущее значение как baseline (не прибавляем его)
+            if email not in self._last_synced:
+                self._baseline[email] = total
+                self._last_synced[email] = total
+        
+        self._baseline_initialized = True
+        self._save_state()
+        print(f"📊 Baseline initialized for {len(self._baseline)} users")
+    
+    def _calculate_delta(self, email: str, current_total: int) -> int:
+        """Вычисляет дельту трафика для синхронизации"""
+        last_synced = self._last_synced.get(email, 0)
+        
+        # Если current_total < last_synced - значит Xray был перезапущен
+        # В этом случае весь current_total это новый трафик
+        if current_total < last_synced:
+            print(f"🔄 Xray restart detected for {email}, resetting baseline")
+            return current_total
+        
+        return current_total - last_synced
+    
     def should_sync(self, email: str, total: int) -> bool:
         """Проверяет нужна ли синхронизация"""
-        if not self.enabled or total < self.min_sync_mb:
+        if not self.enabled:
             return False
         
-        last_total = self._last_synced.get(email, 0)
-        delta = total - last_total
-        return delta >= self.min_sync_mb
+        delta = self._calculate_delta(email, total)
+        return delta >= self.min_sync_bytes
     
     def get_user_gb_from_baserow(self, email: str) -> float:
         """Получает текущий GB из Baserow"""
@@ -316,67 +348,18 @@ class BaserowSync:
             if response.status_code == 200:
                 results = response.json().get('results', [])
                 for row in results:
-                    # Ищем по user И server
                     if row.get('user') == username and row.get('server') == self.server_name:
                         gb_value = row.get('GB', 0)
                         if isinstance(gb_value, str):
                             gb_value = ''.join(c for c in gb_value if c.isdigit() or c == '.')
                             try:
-                                gb_value = float(gb_value)
+                                gb_value = float(gb_value) if gb_value else 0.0
                             except:
                                 gb_value = 0.0
                         return float(gb_value or 0)
         except Exception as e:
             print(f"⚠️  Error getting GB: {e}")
         return 0.0
-    
-    def sync_user(self, email: str, uplink: int, downlink: int) -> bool:
-        """Синхронизирует пользователя"""
-        total = uplink + downlink
-        
-        if not self.should_sync(email, total):
-            return False
-        
-        try:
-            username = self.extract_username(email)
-            
-            # Получаем текущий GB из Baserow
-            current_gb = self.get_user_gb_from_baserow(email)
-            current_bytes = int(current_gb * 1024 ** 3)
-            
-            # Добавляем новый трафик
-            new_total_bytes = current_bytes + total
-            new_total_gb = round(new_total_bytes / (1024 ** 3), 6)
-            
-            # Ищем строку
-            user_row = self._find_user_row(username)
-            
-            if user_row:
-                # Обновляем
-                row_id = user_row['id']
-                update_data = {"GB": new_total_gb}
-                
-                if self._update_row(row_id, update_data):
-                    self._last_synced[email] = total
-                    print(f"✅ Synced {username}: +{total/(1024**3):.2f} GB → {new_total_gb:.2f} GB")
-                    return True
-            else:
-                # Создаем
-                create_data = {
-                    "user": username,
-                    "server": self.server_name,
-                    "GB": new_total_gb
-                }
-                
-                if self._create_row(create_data):
-                    self._last_synced[email] = total
-                    print(f"✅ Created {username}: {new_total_gb:.2f} GB")
-                    return True
-                    
-        except Exception as e:
-            print(f"❌ Sync error {email}: {e}")
-        
-        return False
     
     def _find_user_row(self, username: str) -> Optional[Dict]:
         """Ищет строку по user И server"""
@@ -417,10 +400,70 @@ class BaserowSync:
             print(f"⚠️  Update error: {e}")
             return False
     
+    def sync_user(self, email: str, uplink: int, downlink: int) -> bool:
+        """Синхронизирует пользователя - ИСПРАВЛЕННАЯ ЛОГИКА"""
+        total = uplink + downlink
+        
+        if not self.should_sync(email, total):
+            return False
+        
+        try:
+            username = self.extract_username(email)
+            
+            # Вычисляем дельту (только новый трафик!)
+            delta = self._calculate_delta(email, total)
+            
+            if delta <= 0:
+                return False
+            
+            # Получаем текущий GB из Baserow
+            current_gb = self.get_user_gb_from_baserow(email)
+            current_bytes = int(current_gb * 1024 ** 3)
+            
+            # Прибавляем ТОЛЬКО дельту
+            new_total_bytes = current_bytes + delta
+            new_total_gb = round(new_total_bytes / (1024 ** 3), 6)
+            
+            # Ищем строку
+            user_row = self._find_user_row(username)
+            
+            if user_row:
+                # Обновляем
+                row_id = user_row['id']
+                update_data = {"GB": new_total_gb}
+                
+                if self._update_row(row_id, update_data):
+                    self._last_synced[email] = total  # Запоминаем текущий total
+                    self._save_state()
+                    delta_gb = delta / (1024 ** 3)
+                    print(f"✅ Synced {username}: +{delta_gb:.4f} GB → {new_total_gb:.4f} GB total")
+                    return True
+            else:
+                # Создаем новую запись
+                create_data = {
+                    "user": username,
+                    "server": self.server_name,
+                    "GB": round(delta / (1024 ** 3), 6)  # Только дельта для новой записи
+                }
+                
+                if self._create_row(create_data):
+                    self._last_synced[email] = total
+                    self._save_state()
+                    print(f"✅ Created {username}: {delta / (1024 ** 3):.4f} GB")
+                    return True
+                    
+        except Exception as e:
+            print(f"❌ Sync error {email}: {e}")
+        
+        return False
+    
     def sync_all(self, users: Dict[str, TrafficData], sync_interval_minutes: int) -> int:
         """Синхронизирует всех по расписанию"""
         if not self.enabled:
             return 0
+        
+        # Инициализируем baseline при первом вызове
+        self._initialize_baseline(users)
         
         current_time = time.time()
         time_since_sync = (current_time - self._last_sync_time) / 60
@@ -442,6 +485,9 @@ class BaserowSync:
         if synced_count > 0:
             print(f"{'='*60}")
             print(f"✅ Синхронизировано: {synced_count}")
+            print(f"{'='*60}\n")
+        else:
+            print(f"ℹ️  Нет данных для синхронизации (дельта < {self.min_sync_bytes / (1024*1024):.0f} MB)")
             print(f"{'='*60}\n")
         
         return synced_count
@@ -492,41 +538,39 @@ class ConsoleRenderer:
         print()
         
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        active_count = sum(1 for u in users.values() if u.uplink_speed > 0 or u.downlink_speed > 0)
-        print(f"{self.YELLOW}Время:{self.NC} {timestamp}    "
-              f"{self.YELLOW}Всего:{self.NC} {len(users)}    "
-              f"{self.YELLOW}Активных:{self.NC} {active_count}")
-        print()
+        active_count = sum(1 for d in users.values() if d.up_speed > 0 or d.down_speed > 0)
         
-        header = f"{self.CYAN}{'EMAIL':<30} {'UPLINK':>15} {'DOWNLINK':>15} {'UP SPEED':>15} {'DOWN SPEED':>15} {'TOTAL':>15}{self.NC}"
-        print(header)
-        print("─" * 120)
+        print(f"Время: {timestamp}    Всего: {len(users)}    Активных: {active_count}")
         
-        sorted_users = sorted(users.items(), key=lambda x: (x[1].uplink_speed + x[1].downlink_speed, x[0]), reverse=True)
+        # Header
+        print(f"{'EMAIL':<20} {'UPLINK':>15} {'DOWNLINK':>15} {'UP SPEED':>15} {'DOWN SPEED':>15} {'TOTAL':>15}")
+        print("-" * 95)
         
-        for email, data in sorted_users:
-            is_active = data.uplink_speed > 0 or data.downlink_speed > 0
+        # Users
+        for email, data in sorted(users.items()):
+            total = data.uplink + data.downlink
+            is_active = data.up_speed > 0 or data.down_speed > 0
             color = self.GREEN if is_active else self.NC
             
-            line = (f"{color}{email:<30} "
-                   f"{self.format_bytes(data.uplink):>15} "
-                   f"{self.format_bytes(data.downlink):>15} "
-                   f"{self.format_speed(data.uplink_speed):>15} "
-                   f"{self.format_speed(data.downlink_speed):>15} "
-                   f"{self.format_bytes(data.total):>15}{self.NC}")
-            print(line)
+            print(f"{color}{email:<20} "
+                  f"{self.format_bytes(data.uplink):>15} "
+                  f"{self.format_bytes(data.downlink):>15} "
+                  f"{self.format_speed(data.up_speed):>15} "
+                  f"{self.format_speed(data.down_speed):>15} "
+                  f"{self.format_bytes(total):>15}{self.NC}")
         
-        total_up, total_down, total_up_speed, total_down_speed = aggregator.get_totals()
-        print("─" * 120)
-        total_line = (f"{self.WHITE}{'ИТОГО:':<30} "
-                     f"{self.format_bytes(total_up):>15} "
-                     f"{self.format_bytes(total_down):>15} "
-                     f"{self.format_speed(total_up_speed):>15} "
-                     f"{self.format_speed(total_down_speed):>15} "
-                     f"{self.format_bytes(total_up + total_down):>15}{self.NC}")
-        print(total_line)
+        # Total
+        print("-" * 95)
+        total_all = aggregator.total_up + aggregator.total_down
+        print(f"{'ИТОГО:':<20} "
+              f"{self.format_bytes(aggregator.total_up):>15} "
+              f"{self.format_bytes(aggregator.total_down):>15} "
+              f"{'':>15} {'':>15} "
+              f"{self.format_bytes(total_all):>15}")
+        
         print()
-        print(f"{self.YELLOW}Легенда:{self.NC} {self.GREEN}Зеленый{self.NC} = активен | {self.WHITE}Белый{self.NC} = неактивен")
+        print(f"Легенда: {self.GREEN}Зеленый{self.NC} = активен | Белый = неактивен")
+
 
 # ============================================================================
 # CONFIG LOADER
@@ -574,6 +618,7 @@ def load_config(config_path: str = "/opt/xray-monitor/monitor_config.conf") -> D
     
     return config
 
+
 # ============================================================================
 # MAIN
 # ============================================================================
@@ -608,8 +653,11 @@ async def monitoring_loop(client, aggregator, renderer, baserow, interval, sync_
     
     except KeyboardInterrupt:
         print("\n⏹️  Остановка...")
+        if baserow:
+            baserow._save_state()
     finally:
         await client.disconnect()
+
 
 def main():
     parser = argparse.ArgumentParser(description='Xray Traffic Monitor')
@@ -642,6 +690,7 @@ def main():
         ))
     except KeyboardInterrupt:
         print("\n✅ Завершено")
+
 
 if __name__ == '__main__':
     main()
